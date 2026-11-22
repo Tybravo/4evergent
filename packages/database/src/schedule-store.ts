@@ -95,6 +95,8 @@ export class InMemoryScheduleStore implements ScheduleStore {
   async delete(id: string): Promise<boolean> {
     return this.records.delete(id);
   }
+
+  close(): void {}
 }
 
 interface ScheduleRow {
@@ -119,12 +121,13 @@ interface ScheduleRow {
  * database server required. Data persists across process restarts in a file
  * at the path provided to the constructor.
  *
- * Schema is versioned in _meta (schema_version = 3). initSchema() is
+ * Schema is versioned in _meta (schema_version = 5). initSchema() is
  * idempotent and safe to call on every construction.
  */
 export class SQLiteScheduleStore implements ScheduleStore {
   private db: DatabaseSync;
   private dbPath: string;
+  private closed = false;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -339,6 +342,8 @@ export class SQLiteScheduleStore implements ScheduleStore {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     closeSharedConnection(this.dbPath);
   }
 }

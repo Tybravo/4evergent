@@ -6,6 +6,7 @@ import { test, expect, describe, vi, afterEach } from 'vitest';
 const { mockApi } = vi.hoisted(() => ({
   mockApi: {
     listApprovals: vi.fn(),
+    listAllAgents: vi.fn(),
     approve: vi.fn(),
     reject: vi.fn(),
   }
@@ -76,6 +77,20 @@ describe('Approvals', () => {
       expect(callArg![0]).toBe('aprv-2');
       expect(typeof callArg![0]).toBe('string');
     });
+  });
+
+  test('expired approval renders expired badge and no approve/reject buttons', async () => {
+    const expiredAppr = {
+      ...makeApproval('expired', 'agent-exp', '100'),
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+    };
+    mockApi.listApprovals.mockResolvedValue({ approvals: [expiredAppr] });
+    render(<MemoryRouter><Approvals /></MemoryRouter>);
+
+    const row = await screen.findByText('agent-exp').then((el) => el.closest('tr')!);
+    expect(within(row).getByText('expired')).toBeInTheDocument();
+    expect(within(row).queryByText('Approve')).not.toBeInTheDocument();
+    expect(within(row).queryByText('Reject')).not.toBeInTheDocument();
   });
 
   test('reject button confirms before calling api.reject', async () => {
@@ -175,5 +190,31 @@ describe('Approvals', () => {
     });
     expect(screen.getByText('agent-h')).toBeInTheDocument();
     expect(mockApi.listApprovals).toHaveBeenCalledTimes(1);
+  });
+
+  test('renders agent display names for known agents and falls back to raw ID for unknown agents', async () => {
+    mockApi.listAllAgents.mockResolvedValue({
+      agents: [
+        { id: 'agent-1', displayName: 'Treasury' },
+        { id: 'agent-2', displayName: 'Payroll' },
+      ],
+      total: 2,
+      truncated: false,
+    });
+    mockApi.listApprovals.mockResolvedValue({
+      approvals: [
+        makeApproval('1', 'agent-1', '50'),
+        makeApproval('2', 'agent-2', '75'),
+        makeApproval('3', 'agent-deleted-9999', '10'),
+      ],
+      hasMore: false,
+    });
+
+    render(<MemoryRouter><Approvals /></MemoryRouter>);
+
+    expect(await screen.findByText('Treasury')).toBeInTheDocument();
+    expect(screen.getByText('Payroll')).toBeInTheDocument();
+    expect(screen.getByText('agent-deleted-9999')).toBeInTheDocument();
+    expect(mockApi.listAllAgents).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { useAgentNames } from '../agentNames';
 import type { ApprovalRecord } from '../types';
-import { ConfirmationModal, Skeleton, EmptyState, PaginationFooter } from '../components';
+import { AgentName, ConfirmationModal, Skeleton, EmptyState, PaginationFooter } from '../components';
 
 const PAGE_SIZE = 50;
 
@@ -13,8 +14,10 @@ export default function Approvals() {
   const [nextOffset, setNextOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const agentNames = useAgentNames();
 
   const loadPage = useCallback(async (offset: number, replace: boolean) => {
     try {
@@ -23,8 +26,10 @@ export default function Approvals() {
       setHasMore(r.hasMore);
       setTotal(r.total ?? null);
       setNextOffset(offset + r.approvals.length);
+      if (!replace) setLoadMoreError(null);
     } catch (e: any) {
-      setError(e.message);
+      if (replace) setError(e.message);
+      else setLoadMoreError(e.message ?? 'Failed to load more approvals');
     }
   }, []);
 
@@ -33,6 +38,12 @@ export default function Approvals() {
   }, [loadPage]);
 
   const loadMore = () => {
+    setLoadingMore(true);
+    loadPage(nextOffset, false).finally(() => setLoadingMore(false));
+  };
+
+  const retryLoadMore = () => {
+    setLoadMoreError(null);
     setLoadingMore(true);
     loadPage(nextOffset, false).finally(() => setLoadingMore(false));
   };
@@ -80,18 +91,26 @@ export default function Approvals() {
             {approvals.map((a) => (
               <tr key={a.id}>
                 <td><Link to={`/approvals/${a.id}`} className="table-row-link">{a.id.slice(0, 8)}</Link></td>
-                <td><code>{a.agentId}</code></td>
+                <td><AgentName agentId={a.agentId} agentNames={agentNames} /></td>
                 <td>{a.intent.type}</td>
                 <td>{a.intent.amount || '-'}</td>
                 <td>{a.intent.asset || ''}</td>
                 <td>{a.expiresAt ? new Date(a.expiresAt).toLocaleString() : 'no expiry'}</td>
                 <td>
-                  <div style={{ display: 'flex', gap: 'var(--space-xs)' }}>
-                    <button className="btn btn-primary btn-sm" disabled={loadingId === a.id} onClick={() => handleAction(a.id, 'approve')}>
-                      {loadingId === a.id ? 'Processing...' : 'Approve'}
-                    </button>
-                    <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => setRejectId(a.id)}>Reject</button>
-                  </div>
+                  {(() => {
+                    const isExpired = a.status === 'expired' || (a.expiresAt ? new Date(a.expiresAt) <= new Date() : false);
+                    if (isExpired) {
+                      return <span className="badge badge-err">expired</span>;
+                    }
+                    return (
+                      <div style={{ display: 'flex', gap: 'var(--space-xs)' }}>
+                        <button className="btn btn-primary btn-sm" disabled={loadingId === a.id} onClick={() => handleAction(a.id, 'approve')}>
+                          {loadingId === a.id ? 'Processing...' : 'Approve'}
+                        </button>
+                        <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => setRejectId(a.id)}>Reject</button>
+                      </div>
+                    );
+                  })()}
                 </td>
               </tr>
             ))}
@@ -100,6 +119,7 @@ export default function Approvals() {
       </div>
 
       <PaginationFooter hasMore={hasMore} loadingMore={loadingMore} onLoadMore={loadMore} itemCount={approvals.length} />
+      {loadMoreError && <div className="error" role="alert">{loadMoreError} <button className="btn btn-secondary btn-sm" onClick={retryLoadMore}>Retry</button></div>}
       {rejectId !== null && (
         <ConfirmationModal title="Reject this approval?" actionLabel="Reject"
           onCancel={() => setRejectId(null)}

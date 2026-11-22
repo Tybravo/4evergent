@@ -283,7 +283,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  updateSchedule: (agentId: string, scheduleId: string, body: { scheduleExpression?: string }) =>
+  updateSchedule: (
+    agentId: string,
+    scheduleId: string,
+    body: {
+      scheduleExpression?: string;
+      timezone?: string;
+      intent?: Partial<SubmitPaymentIntent>;
+    }
+  ) =>
     request<{ schedule: ScheduleRecord }>(
       `/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
       { method: 'PATCH', body: JSON.stringify(body) }

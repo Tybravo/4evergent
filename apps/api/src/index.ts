@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createRequire } from "node:module";
 import { log, generateRequestId, runRequestIdContext } from "./logging.js";
 import type {
   AgentIntent,
@@ -38,7 +39,10 @@ import {
   SQLitePolicyConfigStore,
   assertNoSecrets,
   validateApprovalTransition,
+  closeSharedConnection,
   ResourceAuthorizationService,
+  classifyPipelineOutcome,
+  classifyError,
   type AuthorizationContext,
   type ActivityStore,
   type ApprovalStore,
@@ -51,10 +55,15 @@ import {
   createActivity,
   isOffsetAtCeiling,
   clampOffset,
+  getSharedConnection,
+  getSchemaVersion,
 } from "@4evergent/database";
 import type { PolicyRules, Agent, RequestContext, AuthorizationService, AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { createAuthModule, type PrincipalResolution } from "./auth.js";
 import { sweepRetainedData } from "./data-retention.js";
+
+const require = createRequire(import.meta.url);
+export const API_VERSION: string = (require("../package.json") as { version: string }).version;
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
 
@@ -62,7 +71,7 @@ interface IntentResponse {
   activityId: string;
   agentId: string;
   status: string;
-  policyDecision: PolicyDecision;
+  policyDecision: PolicyDecision | null;
   authorizationStatus: AuthorizationStatus;
   simulationResult: SimulationResult | null;
   txHash: string | null;
@@ -257,6 +266,11 @@ export async function createApiServer(options: ServerOptions) {
     approvalStore: approvals,
     policyRules: options.policyRules,
     policyResolver: getRules,
+    agentResolver: async (agentId: string) => {
+      const dbAgent = await agentStore.get(agentId);
+      if (dbAgent) return dbAgent;
+      return agents.get(agentId);
+    },
   });
 
   // Phase 28J: PolicyEngine in API uses the SAME resolver
@@ -511,6 +525,37 @@ export async function createApiServer(options: ServerOptions) {
       record: ExecutionRecord,
       context?: import("./execution-queue.js").ExecutionContext
     ) => {
+      // Incident-response boundary: Check agent status before acquiring lock / submitting.
+      // An execution queued (or retried) while an agent was active must NOT execute
+      // or submit to Horizon if the agent has since been paused or disabled.
+      const agent = (await agentStore.get(record.agentId)) ?? agents.get(record.agentId);
+      if (agent && agent.status !== "active") {
+        const agentStatus = agent.status;
+        const message = `agent is ${agentStatus}; queued execution rejected`;
+        if (record.approvalId) {
+          await approvals.update(record.approvalId, { status: "failed", error: message });
+          const app = await approvals.get(record.approvalId);
+          if (app) {
+            await releaseDecisionReservation(app.agentId, app.policyDecision);
+          }
+        }
+        if (record.activityId) {
+          const act = await store.get(record.activityId);
+          if (act) {
+            await store.update(record.activityId, { status: "failed", error: message });
+          }
+        }
+        return {
+          record,
+          success: false,
+          status: "rejected",
+          error: message,
+          errorClass: "permanent" as const,
+          txHash: undefined,
+          submittedHash: null,
+          activityId: record.activityId ?? undefined,
+        };
+      }
       // Phase 25: Wrap sequence-sensitive execution in account-scoped lock.
       //
       // WHY: Two concurrent executions using the SAME Stellar source account
@@ -567,14 +612,14 @@ export async function createApiServer(options: ServerOptions) {
           }
           const txHash = (outcome as { txHash?: string }).txHash;
           if (txHash) {
-            context?.onSubmitted?.(txHash);
+            await context?.onSubmitted?.(txHash);
           }
           return {
             record,
             success: outcome.status === "submitted",
             status: outcome.status,
             error: outcome.message,
-            errorClass: outcome.status === "rejected" ? "permanent" as const : "transient" as const,
+            errorClass: classifyPipelineOutcome(outcome),
             txHash,
             submittedHash: txHash ?? null,
             activityId: (outcome as { activityId?: string }).activityId ?? record.activityId ?? undefined,
@@ -613,7 +658,7 @@ export async function createApiServer(options: ServerOptions) {
             success: false,
             status: "failed",
             error: err instanceof Error ? err.message : String(err),
-            errorClass: "transient" as const,
+            errorClass: classifyError(err),
             activityId: record.activityId ?? undefined,
           };
         }
@@ -718,7 +763,7 @@ export async function createApiServer(options: ServerOptions) {
                 schedule.agentId,
                 schedule.ownerId,
                 schedule.intent,
-                { result: "allow", reason: "schedule enqueued", rule: "scheduler", intent: schedule.intent }
+                null
               );
               activityRecord.id = activityId;
               activityRecord.status = "pending";
@@ -746,16 +791,27 @@ export async function createApiServer(options: ServerOptions) {
               createdAt: now,
               updatedAt: now,
             };
-            void executionQueue.enqueue(executionRecord);
+            try {
+              await executionQueue.enqueue(executionRecord);
+            } catch (err) {
+              console.error(`[scheduler] failed to enqueue execution for schedule ${schedule.id}:`, err);
+              if (store) {
+                try {
+                  await store.update(activityId, {
+                    status: "failed",
+                    error: `Failed to enqueue execution: ${err instanceof Error ? err.message : String(err)}`,
+                    updatedAt: new Date().toISOString(),
+                  });
+                } catch (updateErr) {
+                  console.error(`[scheduler] failed to mark activity ${activityId} failed for schedule ${schedule.id}:`, updateErr);
+                }
+              }
+              throw err;
+            }
             return {
               status: "submitted",
               message: "schedule enqueued for execution",
-              policyDecision: {
-                result: "allow",
-                reason: "schedule enqueued",
-                rule: "scheduler",
-                intent: schedule.intent,
-              },
+              policyDecision: null,
               simulationResult: null,
               txHash: null as unknown as string,
               activityId: undefined,
@@ -790,13 +846,17 @@ export async function createApiServer(options: ServerOptions) {
       try {
         const result = await sweepRetainedData({
           store,
+          approvalStore: approvals,
           authModule,
           now: Date.now(),
           authSessionDays: sessionDays,
           dailySpendingDays: spendingDays,
           batchSize: 500,
+          onApprovalExpired: async (approval) => {
+            await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+          },
         });
-        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}`);
+        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}, expired_approvals=${result.expiredApprovalsSwept}`);
       } catch (err) {
         console.error("[retention] sweep failed:", err);
       } finally {
@@ -910,7 +970,15 @@ export async function createApiServer(options: ServerOptions) {
     return als.run(requestScopedCtx, () => {
       // Health check is public
       if (method === "GET" && url === "/health") {
-        return json(res, { status: "ok", signerAccountId: options.signer.getAccountId() });
+        const schemaVersion = options.dbPath
+          ? getSchemaVersion(getSharedConnection(options.dbPath))
+          : null;
+        return json(res, {
+          status: "ok",
+          signerAccountId: options.signer.getAccountId(),
+          version: API_VERSION,
+          schemaVersion,
+        });
       }
 
       // Public readiness: bounded/cached dependency reads, fresh worker status.
@@ -1335,6 +1403,11 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !activityId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the activity must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // activity exists under a different agent.
+    const canAccess = await authorizationService.canAccessActivity(ctx, activityId, agentId);
+    if (!canAccess) return apiError(res, "ACTIVITY_NOT_FOUND");
     const activity = await store.getForOwner(activityId, ctx.ownerId!);
     if (!activity) return apiError(res, "ACTIVITY_NOT_FOUND");
     return json(res, { activity });
@@ -1385,6 +1458,9 @@ export async function createApiServer(options: ServerOptions) {
         details: { currentStatus: result.currentStatus, requestedStatus: status },
       });
     }
+    if (agents.has(agentId)) {
+      agents.set(agentId, result.agent);
+    }
     return json(res, { id: result.agent.id, status: result.agent.status });
   }
 
@@ -1411,10 +1487,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the schedule must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // schedule exists under a different agent.
+    const canAccess = await authorizationService.canAccessSchedule(ctx, scheduleId, agentId);
+    if (!canAccess) return apiError(res, "SCHEDULE_NOT_FOUND");
     const schedule = await schedules.get(scheduleId);
-    if (!schedule || schedule.ownerId !== ctx.ownerId!) {
-      return apiError(res, "SCHEDULE_NOT_FOUND");
-    }
+    if (!schedule) return apiError(res, "SCHEDULE_NOT_FOUND");
     return json(res, { schedule });
   }
 
@@ -1475,7 +1554,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId, agentId);
     if (!canUpdate) return apiError(res, "AGENT_NOT_FOUND");
 
     let body: unknown;
@@ -1489,35 +1569,67 @@ export async function createApiServer(options: ServerOptions) {
     const schedule = await schedules.get(scheduleId);
     if (!schedule) return apiError(res, "SCHEDULE_NOT_FOUND");
 
-    // Reject any body that contains fields other than the one accepted field.
-    // A PATCH that sends {"cronExpression":"..."} or {"amount":"5"} looks like
-    // success from the caller's perspective but changes nothing — a silent lie.
+    // Reject any body that contains unknown top-level fields.
     // Unknown keys are named in the error so the caller can self-correct.
-    const ACCEPTED_FIELDS = new Set(["scheduleExpression"]);
-    const bodyKeys = body !== null && typeof body === "object" ? Object.keys(body) : [];
+    const ACCEPTED_FIELDS = new Set(["scheduleExpression", "timezone", "intent"]);
+    const bodyObj = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+    const bodyKeys = Object.keys(bodyObj);
     const unknownKeys = bodyKeys.filter((k) => !ACCEPTED_FIELDS.has(k));
     if (unknownKeys.length > 0) {
       return apiError(res, "VALIDATION_ERROR", {
-        message: `unknown field(s): ${unknownKeys.join(", ")}; accepted field: scheduleExpression`,
+        message: `unknown field(s): ${unknownKeys.join(", ")}; accepted fields: scheduleExpression, timezone, intent`,
       });
     }
 
-    // An empty body or a body with no recognized field carries no update — reject
-    // rather than bumping updatedAt for a no-op.
-    if (!bodyKeys.includes("scheduleExpression")) {
+    // An empty body carries no update — reject rather than bumping updatedAt for a no-op.
+    if (bodyKeys.length === 0) {
       return apiError(res, "VALIDATION_ERROR", {
-        message: "body must include scheduleExpression; no other fields are accepted",
+        message: "body must include at least one of: scheduleExpression, timezone, intent",
       });
     }
 
-    const { validateScheduleExpression } = await import("@4evergent/database");
-    const result = validateScheduleExpression((body as any).scheduleExpression, schedule.timezone);
-    if (!result.valid) return apiError(res, "VALIDATION_ERROR", { message: result.error });
+    const { validateScheduleExpression, validateScheduleIntent } = await import("@4evergent/database");
+    const patch: Partial<ScheduleRecord> = {};
 
-    const patch: Partial<ScheduleRecord> = {
-      scheduleExpression: (body as any).scheduleExpression,
-      nextRunAt: result.nextRunAt ?? schedule.nextRunAt,
-    };
+    if (bodyObj.intent !== undefined) {
+      if (typeof bodyObj.intent !== "object" || bodyObj.intent === null || Array.isArray(bodyObj.intent)) {
+        return apiError(res, "VALIDATION_ERROR", { message: "intent must be an object" });
+      }
+      const incomingIntent = bodyObj.intent as Record<string, unknown>;
+      const mergedIntent: Record<string, unknown> = {
+        ...schedule.intent,
+        ...incomingIntent,
+      };
+      if (mergedIntent.asset === "XLM" && incomingIntent.assetDetails === undefined) {
+        delete mergedIntent.assetDetails;
+      }
+      const intentValidation = validateScheduleIntent(mergedIntent as any);
+      if (!intentValidation.valid) {
+        return apiError(res, "VALIDATION_ERROR", { message: intentValidation.error });
+      }
+      patch.intent = mergedIntent as any;
+    }
+
+    if (bodyObj.scheduleExpression !== undefined || bodyObj.timezone !== undefined) {
+      const nextExpression =
+        bodyObj.scheduleExpression !== undefined
+          ? (bodyObj.scheduleExpression as string)
+          : schedule.scheduleExpression;
+      const nextTimezone =
+        bodyObj.timezone !== undefined
+          ? (bodyObj.timezone as string)
+          : schedule.timezone;
+      const result = validateScheduleExpression(nextExpression, nextTimezone);
+      if (!result.valid) return apiError(res, "VALIDATION_ERROR", { message: result.error });
+
+      if (bodyObj.scheduleExpression !== undefined) {
+        patch.scheduleExpression = nextExpression;
+      }
+      if (bodyObj.timezone !== undefined) {
+        patch.timezone = nextTimezone;
+      }
+      patch.nextRunAt = result.nextRunAt ?? schedule.nextRunAt;
+    }
 
     const updated = await schedules.update(scheduleId, patch);
     return json(res, { schedule: updated });
@@ -1529,7 +1641,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId, agentId);
     if (!canDelete) return apiError(res, "AGENT_NOT_FOUND");
     const deleted = await schedules.delete(scheduleId);
     if (!deleted) return apiError(res, "SCHEDULE_NOT_FOUND");
@@ -1545,12 +1658,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId || !action) return apiError(res, "INVALID_PATH_PARAM");
 
     let allowed: boolean;
+    // Issue #385: bind the schedule to the agent named in the path.
     if (action === "pause") {
-      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId, agentId);
     } else if (action === "resume") {
-      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId, agentId);
     } else {
-      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId, agentId);
     }
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
 
@@ -1915,17 +2029,36 @@ export async function createApiServer(options: ServerOptions) {
     const canApprove = await authorizationService.canApprove(ctx, approvalId);
     if (!canApprove) return approvalError(res, "APPROVAL_NOT_FOUND", { approvalId, activityId: "", status: "rejected", message: "approval not found" });
 
+    if (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date())) {
+      if (approval.status !== "expired") {
+        await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
+        // #353: expired approval will never execute — release the reservation
+        // made when the intent was created.
+        await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+      }
+      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
+    }
+
     const transitionError = validateApprovalTransition(approval.status, "approved");
     if (transitionError) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot approve: ${transitionError}` });
     }
 
-    if (approval.expiresAt && new Date(approval.expiresAt) < new Date()) {
-      await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
-      // #353: expired approval will never execute — release the reservation
-      // made when the intent was created.
-      await releaseDecisionReservation(approval.agentId, approval.policyDecision);
-      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
+    // Incident-response boundary: approving an intent for a non-active agent is rejected.
+    // Paused: pending approvals remain in `pending_approval` until TTL expiry, but cannot
+    // be approved (`agent is paused; cannot approve intent`). If resumed to active, approval is permitted.
+    // Disabled: terminal state. Approve is rejected (`agent is disabled; cannot approve intent`).
+    const agent = (await agentStore.get(approval.agentId)) ?? agents.get(approval.agentId);
+    if (!agent) {
+      return approvalError(res, "AGENT_NOT_FOUND", { approvalId, activityId: approval.activityId, status: approval.status, message: "agent not found" });
+    }
+    if (agent.status !== "active") {
+      return approvalError(res, "AGENT_NOT_ACTIVE", {
+        approvalId,
+        activityId: approval.activityId,
+        status: approval.status,
+        message: `agent is ${agent.status}; cannot approve intent`,
+      });
     }
 
     // Atomic claim: pending_approval → approved in one conditional step.
@@ -2006,6 +2139,14 @@ export async function createApiServer(options: ServerOptions) {
     const canReject = await authorizationService.canReject(ctx, approvalId);
     if (!canReject) return approvalError(res, "APPROVAL_NOT_FOUND", { approvalId, activityId: "", status: "rejected", message: "approval not found" });
 
+    if (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date())) {
+      if (approval.status !== "expired") {
+        await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
+        await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+      }
+      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
+    }
+
     const transitionError = validateApprovalTransition(approval.status, "rejected");
     if (transitionError) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot reject: ${transitionError}` });
@@ -2021,7 +2162,7 @@ export async function createApiServer(options: ServerOptions) {
       const current = await approvals.get(approvalId);
       return approvalError(res, "APPROVAL_CONFLICT", { approvalId, activityId: approval.activityId, status: current?.status ?? approval.status, message: `approval already decided (now ${current?.status ?? approval.status}); refresh before retrying` });
     }
-    await store.update(approval.activityId, { status: "rejected", authorizationStatus: "denied_by_policy", error: "approval rejected by human" });
+    await store.update(approval.activityId, { status: "rejected", authorizationStatus: "denied_by_approver", error: "approval rejected by human" });
     // #353: rejected approval will never execute — release the reservation
     // made when the intent was created.
     await releaseDecisionReservation(approval.agentId, approval.policyDecision);
@@ -2062,7 +2203,7 @@ export async function createApiServer(options: ServerOptions) {
     // fails closed when HOST is non-loopback and API_KEYS is unset.
     listen: (port: number, host: string = "127.0.0.1") =>
       new Promise<void>((resolve) => server.listen(port, host, resolve)),
-    close: (options?: { drainTimeoutMs?: number }) =>
+    close: (closeOptions?: { drainTimeoutMs?: number }) =>
       new Promise<void>((resolve, reject) => {
         // 1. Stop accepting new requests and prevent workers from claiming new work.
         if (scheduler) {
@@ -2107,7 +2248,24 @@ export async function createApiServer(options: ServerOptions) {
           resolve();
         };
 
-        const drainTimeout = options?.drainTimeoutMs;
+        const closeDatabase = () => {
+          try {
+            store.close?.();
+            approvals.close?.();
+            schedules.close?.();
+            agentStore.close?.();
+            policyConfigStore.close?.();
+            executionStore.close?.();
+            authModule?.close?.();
+            if (options.dbPath) {
+              closeSharedConnection(options.dbPath, true);
+            }
+          } catch (err) {
+            console.error("[database] error closing database:", err);
+          }
+        };
+
+        const drainTimeout = closeOptions?.drainTimeoutMs;
         if (drainTimeout !== undefined && drainTimeout > 0) {
           drainTimer = setTimeout(() => {
             if (completed) return;
@@ -2117,6 +2275,7 @@ export async function createApiServer(options: ServerOptions) {
             // 3. Force-close remaining connections and terminate outstanding work after timeout expires.
             server.closeAllConnections?.();
             executionQueue?.abortInFlight();
+            closeDatabase();
             const err = new Error(`Shutdown timeout of ${drainTimeout}ms exceeded — forcing exit`);
             err.name = "ShutdownTimeoutError";
             reject(err);
@@ -2131,10 +2290,12 @@ export async function createApiServer(options: ServerOptions) {
 
         Promise.all([httpClose, queueDrain])
           .then(() => {
+            closeDatabase();
             finish();
           })
           .catch((err) => {
             if (drainTimer) clearTimeout(drainTimer);
+            closeDatabase();
             reject(err);
           });
       }),

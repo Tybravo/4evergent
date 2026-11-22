@@ -62,7 +62,7 @@ is optional when the API is running in development authentication mode.
 4evergent activity get <agent-id> <activity-id>  Show activity detail
 4evergent schedule list <agent-id> [limit]  List agent schedules (limit 1-100, default 50)
 4evergent schedule get <agent-id> <sch-id>  Show schedule detail
-4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>]
+4evergent intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]
                                             Submit an intent (see Intent types below)
 4evergent completion <bash|zsh>             Generate shell completion script
 ```
@@ -120,13 +120,56 @@ mkdir -p ~/.zfunc
 Supported intent types (accepted by the transaction pipeline):
 
 ```
-payment       <asset> <amount> <destination> <reason> [memo]
+payment       <asset> <amount> <destination> <reason> [memo] [--issuer <G...>]
 trustline     <assetCode> <issuer> <reason> [limit]
 contract_call <contractId> <function> <args-json-array> <reason>
+account_settings <setting> <value> <reason>
 ```
 
-`account_settings` is NOT supported by the transaction pipeline and is
-rejected by the CLI.
+For non-native (`!= XLM`) payment assets such as `USDC`, `--issuer <G...>` is
+required and must be a valid 56-character Stellar address; the CLI sends it as
+`assetDetails: { code, issuer }` for both `intent submit` and `schedule create`.
+Native `XLM` payments do not take `--issuer` and never include `assetDetails`.
+
+### account_settings intent
+
+The `account_settings` intent type allows updating account configuration settings.
+
+**Syntax:**
+```bash
+4evergent intent submit <agent-id> account_settings <setting> <value> <reason>
+```
+
+**Arguments:**
+- `<setting>` - The name of the setting to update (required string)
+- `<value>` - The new value for the setting (required, see below for format)
+- `<reason>` - Human-readable explanation for the change (required string)
+
+**Value parsing:**
+
+The CLI automatically attempts to parse the `<value>` argument as JSON. If parsing succeeds, the parsed JavaScript value is sent to the API. If parsing fails, the value is sent as a plain string.
+
+Examples:
+
+| CLI command | Value sent to API |
+|---|---|
+| `account_settings thresholds '{"low":1,"medium":2}' "Update thresholds"` | `{ low: 1, medium: 2 }` (object) |
+| `account_settings status "enabled" "Enable feature"` | `"enabled"` (string) |
+| `account_settings status enabled "Enable feature"` | `"enabled"` (string) |
+| `account_settings max_limit 42 "Set limit"` | `42` (number) |
+| `account_settings enabled true "Enable"` | `true` (boolean) |
+
+**Examples:**
+
+Plain string value:
+```bash
+4evergent intent submit agent-123 account_settings notification_mode email "User requested email notifications"
+```
+
+JSON object value:
+```bash
+4evergent intent submit agent-123 account_settings approval_thresholds '{"low":100,"medium":1000,"high":10000}' "Configure approval thresholds"
+```
 
 The server decides the outcome: policy `allow` executes directly,
 `requires_approval` returns an approvalId (approve it later with
@@ -187,8 +230,11 @@ CLI does not retry automatically — retry manually, using the SAME
 4evergent schedule get agent-123 sch-123
 4evergent intent submit agent-123 payment XLM 25 GDAAAA... "weekly payout"
 4evergent intent submit agent-123 payment XLM 25 GDAAAA... "weekly payout" --idempotency-key weekly-42
+4evergent intent submit agent-123 payment USDC 25 GDAAAA... "weekly payout" --issuer GDI73W...
 4evergent intent submit agent-123 trustline USDC GDAAAA... "add USDC trustline" 1000
 4evergent intent submit agent-123 contract_call CABCD... transfer '["arg1","arg2"]' "transfer funds"
+4evergent intent submit agent-123 account_settings notification_mode email "User requested email notifications"
+4evergent intent submit agent-123 account_settings thresholds '{"low":100,"medium":1000}' "Configure thresholds"
 ```
 
 ## Output

@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { useAgentNames } from '../agentNames';
 import type { ActivityRecord } from '../types';
-import { StatusBadge, Skeleton, EmptyState, IntentAmount, PaginationFooter } from '../components';
+import { AgentName, StatusBadge, Skeleton, EmptyState, IntentAmount, PaginationFooter } from '../components';
 
 const PAGE_SIZE = 50;
 
@@ -12,7 +13,9 @@ export default function Activity() {
   const [nextOffset, setNextOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const navigate = useNavigate();
+  const agentNames = useAgentNames();
 
   const loadPage = useCallback(async (offset: number, replace: boolean) => {
     try {
@@ -20,8 +23,10 @@ export default function Activity() {
       setActivity(replace ? r.activity : (prev) => (prev ?? []).concat(r.activity));
       setHasMore(r.hasMore);
       setNextOffset(offset + r.activity.length);
+      if (!replace) setLoadMoreError(null);
     } catch (e: any) {
-      setError(e.message);
+      if (replace) setError(e.message);
+      else setLoadMoreError(e.message ?? 'Failed to load more activity');
     }
   }, []);
 
@@ -30,6 +35,12 @@ export default function Activity() {
   }, [loadPage]);
 
   const loadMore = () => {
+    setLoadingMore(true);
+    loadPage(nextOffset, false).finally(() => setLoadingMore(false));
+  };
+
+  const retryLoadMore = () => {
+    setLoadMoreError(null);
     setLoadingMore(true);
     loadPage(nextOffset, false).finally(() => setLoadingMore(false));
   };
@@ -77,7 +88,7 @@ export default function Activity() {
                 onClick={() => navigate(`/agents/${r.agentId}/activity/${r.id}`)}
               >
                 <td><code>{r.id.slice(0, 8)}</code></td>
-                <td><code>{r.agentId.slice(0, 8)}</code></td>
+                <td><AgentName agentId={r.agentId} agentNames={agentNames} /></td>
                 <td>{r.intent.type}</td>
                 <td><IntentAmount intent={r.intent} /></td>
                 <td><StatusBadge status={r.status} /></td>
@@ -89,6 +100,7 @@ export default function Activity() {
       </div>
 
       <PaginationFooter hasMore={hasMore} loadingMore={loadingMore} onLoadMore={loadMore} itemCount={activity.length} />
+      {loadMoreError && <div className="error" role="alert">{loadMoreError} <button className="btn btn-secondary btn-sm" onClick={retryLoadMore}>Retry</button></div>}
     </section>
   );
 }
