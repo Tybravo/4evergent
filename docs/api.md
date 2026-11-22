@@ -494,6 +494,8 @@ Validated by `validatePolicyRules`; normalized before storage.
 
 ## Schedules
 
+Agent schedules execute intents on a recurring cron-like schedule. These endpoints manage individual agent schedules. For a global view of all schedules across your agents, see [GET /schedules](#get-schedules) in the Dashboard section.
+
 ### POST /agents/:id/schedules
 
 Create a schedule (owner-scoped). Body:
@@ -646,6 +648,94 @@ Response `200`:
 ```
 
 `ActivityRecord` fields are defined in `packages/shared/src/types.ts`.
+
+---
+
+### GET /schedules
+
+List all schedules across every agent owned by the caller.
+
+**Auth:** required (owner-scoped).
+
+**Purpose:** Provides a global view of all scheduled tasks for the authenticated owner, eliminating the need to query each agent individually.
+
+**Owner isolation:** Only returns schedules where `ownerId` matches the authenticated principal. Owner isolation is enforced at the database query level via `ScheduleStore.listByOwner()`.
+
+Query parameters:
+
+| Parameter | Default | Max | Description |
+|---|---|---|---|
+| `limit` | `50` | `100` | Maximum number of schedules to return. Values outside 1–100 are clamped. |
+| `offset` | `0` | `10,000` | Number of schedules to skip. Used for pagination. |
+
+Response `200`:
+
+```json
+{
+  "schedules": [ScheduleRecord],
+  "hasMore": boolean
+}
+```
+
+Each `ScheduleRecord` includes:
+- `id`: Schedule identifier
+- `agentId`: The owning agent's identifier
+- `ownerId`: The owner identifier (always matches authenticated principal)
+- `status`: Schedule status (`"active"`, `"paused"`, or `"disabled"`)
+- `intent`: The agent intent to execute
+- `scheduleExpression`: Cron-like schedule expression
+- `timezone`: Timezone for schedule evaluation
+- `nextRunAt`: ISO 8601 timestamp of next scheduled execution
+- `lastRunAt`: ISO 8601 timestamp of last completed execution (or `null`)
+- `createdAt`, `updatedAt`: ISO 8601 timestamps
+
+`hasMore` is `true` when additional schedules exist beyond the current page and the offset ceiling has not been reached. When `false`, either all matching schedules have been returned or pagination has reached its limit.
+
+**Empty result:** When the authenticated owner has no schedules, returns `200` with:
+
+```json
+{
+  "schedules": [],
+  "hasMore": false
+}
+```
+
+The endpoint never returns `404` or `500` for an owner with zero schedules.
+
+**Example request:**
+
+```
+GET /schedules?limit=10
+```
+
+**Example response:**
+
+```json
+{
+  "schedules": [
+    {
+      "id": "schedule-123",
+      "agentId": "agent-456",
+      "ownerId": "owner-789",
+      "status": "active",
+      "intent": {
+        "type": "payment",
+        "asset": "XLM",
+        "destination": "GDEST...",
+        "amount": "10",
+        "reason": "Monthly payment"
+      },
+      "scheduleExpression": "0 0 1 * *",
+      "timezone": "UTC",
+      "nextRunAt": "2024-02-01T00:00:00.000Z",
+      "lastRunAt": "2024-01-01T00:00:00.000Z",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    }
+  ],
+  "hasMore": false
+}
+```
 
 ---
 

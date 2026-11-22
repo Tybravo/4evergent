@@ -1067,6 +1067,9 @@ export async function createApiServer(options: ServerOptions) {
     if (method === "POST" && /^\/agents\/[^/]+\/schedules\/[^/]+\/(pause|resume|disable)$/.test(url)) {
       return handleScheduleAction(requestScopedCtx, req, res);
     }
+    if (method === "GET" && /^\/schedules(\?.*)?$/.test(url)) {
+      return handleGlobalListSchedules(requestScopedCtx, req, res);
+    }
     if (method === "GET" && /^\/activity(\?.*)?$/.test(url)) {
       return handleListActivity(requestScopedCtx, req, res);
     }
@@ -1758,6 +1761,16 @@ export async function createApiServer(options: ServerOptions) {
     const activity = all.slice(0, limit);
     const hasMore = all.length > limit && !isOffsetAtCeiling(offset);
     return json(res, { activity, hasMore });
+  }
+
+  async function handleGlobalListSchedules(ctx: RequestContext, req: any, res: any) {
+    const urlObj = new URL(req.url ?? "", "http://localhost");
+    const limit = Math.max(1, Math.min(100, Number(urlObj.searchParams.get("limit") ?? 50) || 50));
+    const offset = Math.max(0, Number(urlObj.searchParams.get("offset") ?? 0) || 0);
+    const all = await schedules.listByOwner(ctx.ownerId!, limit + 1, offset);
+    const page = all.slice(0, limit);
+    const hasMore = all.length > limit && !isOffsetAtCeiling(offset);
+    return json(res, { schedules: page, hasMore });
   }
 
   async function handleRetryExecution(ctx: RequestContext, req: any, res: any) {

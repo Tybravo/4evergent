@@ -218,8 +218,11 @@ curl -X POST http://localhost:3000/agents/<agent-id>/schedules \
     "timezone": "UTC"
   }'
 
-# List schedules
+# List schedules for a specific agent
 curl http://localhost:3000/agents/<agent-id>/schedules
+
+# List all schedules across all your agents
+curl http://localhost:3000/schedules
 
 # Pause/resume/disable
 curl -X POST http://localhost:3000/agents/<agent-id>/schedules/<schedule-id>/pause
