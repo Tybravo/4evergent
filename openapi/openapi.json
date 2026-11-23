@@ -759,6 +759,69 @@
         }
       }
     },
+    "/schedules": {
+      "get": {
+        "summary": "List schedules across all of the caller's agents",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "description": "Clamped to 1-100."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            },
+            "description": "Pagination offset. Clamped to 0-10000."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedules owned by the authenticated caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schedules": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ScheduleRecord"
+                      }
+                    },
+                    "hasMore": {
+                      "type": "boolean",
+                      "description": "True when additional schedules exist beyond this page and the offset ceiling has not been reached"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/agents/{id}/policy": {
       "get": {
         "summary": "Get effective policy (DEFAULT_RULES with version 0 if none)",
