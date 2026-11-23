@@ -297,7 +297,7 @@ export class TransactionPipeline {
 
     checkAbort();
 
-    const simResult = await this.simulator.simulate(tx);
+    const simResult = await this.simulator.simulate(tx, signal);
     if (!simResult.success) {
       // #353: simulation failed — the intent will never execute, release
       // its daily-spending reservation.
@@ -355,7 +355,7 @@ export class TransactionPipeline {
     const preSubmitHash = signedTx.hash().toString("hex");
 
     try {
-      const result = await this.submitter.submit(signedTx, this.signer.getNetworkPassphrase());
+      const result = await this.submitter.submit(signedTx, this.signer.getNetworkPassphrase(), signal);
       const activity = this.resolveActivity(activityId, agentId, ownerId, intent, decision, idempotencyKey);
       activity.status = "submitted";
       activity.authorizationStatus = "approved";

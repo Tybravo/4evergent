@@ -1,5 +1,6 @@
 import { Horizon, type Transaction } from "@stellar/stellar-sdk";
 import { validateStellarNetwork, isLiveSubmitEnabled } from "./network-guard.js";
+import { abortError, withAbortSignal } from "./abort.js";
 
 /**
  * Submitter — broadcasts a signed Stellar transaction to the network.
@@ -19,9 +20,14 @@ export class StellarSubmitter {
   private server: Horizon.Server;
   private horizonUrl: string;
 
-  constructor(horizonUrl: string) {
+  /**
+   * @param horizonUrl Horizon endpoint (used when no server is injected).
+   * @param server Optional `Horizon.Server` seam for tests — inject a fake to
+   *        keep `submit()` fully offline. Production callers omit this.
+   */
+  constructor(horizonUrl: string, server?: Horizon.Server) {
     this.horizonUrl = horizonUrl;
-    this.server = new Horizon.Server(horizonUrl);
+    this.server = server ?? new Horizon.Server(horizonUrl);
   }
 
   /**
@@ -29,12 +35,17 @@ export class StellarSubmitter {
    *
    * @param signedTransaction  A signed Transaction object (MUST be signed).
    * @param networkPassphrase The expected network passphrase (for validation).
+   * @param signal Optional cancellation signal. `submitTransaction()` has no
+   *        SDK signal path, so it is raced against the signal: an abort rejects
+   *        with AbortError and the response (if any) is discarded, so the
+   *        caller never reports success for a cancelled submission.
    * @returns The transaction hash on success.
    * @throws Error if Horizon rejects the transaction or safety checks fail.
    */
   async submit(
     signedTransaction: Transaction,
-    networkPassphrase: string
+    networkPassphrase: string,
+    signal?: AbortSignal
   ): Promise<{ hash: string; ledger: number }> {
     // Phase 21: Network safety guard — validate before any network call
     const validation = validateStellarNetwork(this.horizonUrl, networkPassphrase);
@@ -61,13 +72,15 @@ export class StellarSubmitter {
       );
     }
 
+    if (signal?.aborted) throw abortError();
     try {
-      const result = await this.server.submitTransaction(signedTransaction);
+      const result = await withAbortSignal(this.server.submitTransaction(signedTransaction), signal);
       return {
         hash: result.hash,
         ledger: result.ledger,
       };
     } catch (e: any) {
+      if (e?.name === "AbortError") throw e;
       // Horizon returns detailed error info on failure. We surface it so the
       // pipeline can record it and surface it to the operator.
       // SECURITY: Never include secret material in error messages.
