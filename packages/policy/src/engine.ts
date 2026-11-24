@@ -353,11 +353,15 @@ export class PolicyEngine {
    * Only activities with status "submitted" are counted. Pending, rejected,
    * and failed activities do NOT count toward the daily limit.
    */
+  fix/367-canonical-asset-identity
   async getDailySpent(
     asset: string,
     agentId: string,
     rules?: PolicyRules
   ): Promise<number> {
+
+  async getDailySpent(asset: string, agentId: string): Promise<number> {
+  
     if (!this.activityStore) return 0;
 
     const now = new Date();
@@ -386,7 +390,11 @@ export class PolicyEngine {
           break;
         }
         if (activity.status !== "submitted") continue;
+     fix/367-canonical-asset-identity
         const activityAsset = extractAssetIdentity(activity.intent, rules);
+
+        const activityAsset = extractAsset(activity.intent);
+       
         if (activityAsset !== asset) continue;
         const amount = extractAmount(activity.intent);
         if (amount !== null) {
@@ -394,6 +402,14 @@ export class PolicyEngine {
           // parseFloat-truncated value, so the gate and the ledger agree.
           total += toStroops(amount) ?? 0;
         }
+     fix/367-canonical-asset-identity
+      }
+
+      if (reachedEarlierDay || activities.length < PAGE_SIZE) {
+        break;
+      }
+
+    
       }
 
       if (reachedEarlierDay || activities.length < PAGE_SIZE) {
