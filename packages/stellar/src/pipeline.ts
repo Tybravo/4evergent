@@ -597,6 +597,8 @@ export class TransactionPipeline {
     try {
       if (intent.type === "contract_call") {
         tx = await this.builder.buildContractCall(sourceAccount, intent as ContractCallIntent, this.signer.getNetworkPassphrase());
+      } else if (intent.type === "trustline") {
+        tx = await this.builder.buildTrustline(sourceAccount, intent as any, this.signer.getNetworkPassphrase());
       } else if (intent.type === "account_settings") {
         tx = await this.builder.buildAccountSettings(sourceAccount, intent as AccountSettingsIntent, this.signer.getNetworkPassphrase());
       } else {
