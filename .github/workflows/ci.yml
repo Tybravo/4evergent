@@ -64,3 +64,11 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+      - name: Examples smoke
+        # The walkthroughs import workspace packages, which resolve to dist/, so this runs after Build.
+        run: pnpm --filter @4evergent/examples smoke
+
+      - name: Coverage
+        # The coverage script is invoked directly: the root `test:coverage` script is not used (fork-PR hardening).
+        run: node scripts/test-coverage.mjs
