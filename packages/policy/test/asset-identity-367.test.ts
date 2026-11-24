@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PolicyEngine } from "../src/engine.js";
 import { validatePolicyRules } from "../src/validation.js";
+import { isCanonicalAllowedAsset } from "../src/asset-identity.js";
 import { InMemoryActivityStore } from "../../database/src/index.js";
 import type { AgentIntent, PolicyRules } from "@4evergent/shared";
 import { toStroops } from "@4evergent/shared";
@@ -13,6 +14,11 @@ const USDC_ISSUER = "GDI73WJ4SX7LOG3XZDJC3KCK6ED6E5NBYK2JUBQSPBCNNWEG3ZN7T75U";
 const OTHER_ISSUER = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
 const USDC = `USDC:${USDC_ISSUER}`;
 const TRUSTLINE_USDC = `trustline:${USDC}`;
+
+// #512: a typo'd 56-char G... issuer. Identical to USDC_ISSUER except the
+// final character, so it fails the CRC16-XModem checksum and is not a real
+// Stellar address, even though it passes a length + "G" prefix check.
+const TYPO_ISSUER = "GDI73WJ4SX7LOG3XZDJC3KCK6ED6E5NBYK2JUBQSPBCNNWEG3ZN7T75V";
 
 const RULES: PolicyRules = {
   maxTxAmount: { XLM: "1000", [USDC]: "100" },
@@ -254,4 +260,37 @@ test("#367 default XLM behaviour is unchanged", async () => {
   );
   assert.equal(denied.result, "deny");
   assert.equal(denied.rule, "maxTxAmount");
+});
+
+test("#512 validation rejects a typo'd 56-char G... issuer in every policy surface", () => {
+  const typoAsset = `USDC:${TYPO_ISSUER}`;
+  const typoTrustline = `trustline:${typoAsset}`;
+  assert.equal(isCanonicalAllowedAsset(typoAsset), false);
+  assert.equal(isCanonicalAllowedAsset(typoTrustline), false);
+
+  for (const rules of [
+    { maxTxAmount: { [typoAsset]: "100" } },
+    { dailySpendingLimit: { [typoAsset]: "100" } },
+    { allowedAssets: ["XLM", typoAsset] },
+    { maxTxAmount: { [typoTrustline]: "100" } },
+    { allowedAssets: ["XLM", typoTrustline] },
+  ]) {
+    const result = validatePolicyRules(rules);
+    assert.equal(result.valid, false, JSON.stringify(rules));
+    assert.ok(
+      result.errors.some((error) => error.includes("canonical asset identity")),
+      result.errors.join("\n"),
+    );
+  }
+});
+
+test("#512 validation still accepts a real issuer after the validator swap", () => {
+  assert.deepEqual(
+    validatePolicyRules({
+      maxTxAmount: { XLM: "100", [USDC]: "100" },
+      dailySpendingLimit: { [USDC]: "200" },
+      allowedAssets: ["XLM", USDC],
+    }),
+    { valid: true, errors: [] },
+  );
 });
