@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Runnable walkthrough scripts for the @4evergent/* packages. Documentation, not tests.",
   "scripts": {
-    "smoke": "tsx policy-evaluation.ts && tsx intent-validation.ts && tsx in-memory-stores.ts && tsx pipeline-walkthrough.ts"
+    "smoke": "tsx policy-evaluation.ts && tsx intent-validation.ts && tsx in-memory-stores.ts && tsx pipeline-walkthrough.ts",
 
     "build": "tsc -p tsconfig.json",
 "typecheck": "tsc -p tsconfig.json --noEmit"
