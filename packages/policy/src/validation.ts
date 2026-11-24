@@ -12,7 +12,7 @@ const ED25519_PUBLIC_KEY_VERSION_BYTE = 6 << 3; // 'G'
  * Validates a Stellar Ed25519 public key (StrKey `G...` address) including
  * RFC 4648 base32 decoding, version byte, and CRC16-XModem checksum.
  */
-function isValidStellarEd25519PublicKey(address: string): boolean {
+export function isValidStellarEd25519PublicKey(address: string): boolean {
   if (address.length !== 56 || !address.startsWith("G")) {
     return false;
   }

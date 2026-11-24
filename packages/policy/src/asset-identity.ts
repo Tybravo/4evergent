@@ -1,4 +1,5 @@
 import type { AgentIntent, PolicyRules } from "@4evergent/shared";
+import { isValidStellarEd25519PublicKey } from "./validation.js";
 
 /**
  * Canonical asset identity for policy configuration, enforcement, and reporting.
@@ -21,21 +22,17 @@ export function isCanonicalAllowedAsset(value: string): boolean {
     const parts = rest.split(":");
     if (parts.length !== 2) return false;
     const [code, issuer] = parts;
-    return ASSET_CODE_RE.test(code ?? "") && isStellarPublicKey(issuer ?? "");
+    return ASSET_CODE_RE.test(code ?? "") && isValidStellarEd25519PublicKey(issuer ?? "");
   }
   const parts = value.split(":");
   if (parts.length !== 2) return false;
   const [code, issuer] = parts;
-  return ASSET_CODE_RE.test(code ?? "") && isStellarPublicKey(issuer ?? "");
+  return ASSET_CODE_RE.test(code ?? "") && isValidStellarEd25519PublicKey(issuer ?? "");
 }
 
 export function isCanonicalPolicyLimitKey(value: string): boolean {
   if (value === "XLM" || value === "native") return true;
   return isCanonicalAllowedAsset(value);
-}
-
-function isStellarPublicKey(value: string): boolean {
-  return value.length === 56 && value.startsWith("G");
 }
 
 /**
@@ -62,7 +59,7 @@ export function extractAssetIdentity(intent: AgentIntent, rules?: PolicyRules): 
     if (trimmed.toUpperCase() === "XLM") return "XLM";
     if (trimmed.includes(":")) {
       const [code, issuer] = trimmed.split(":");
-      if (code && issuer && ASSET_CODE_RE.test(code) && isStellarPublicKey(issuer)) {
+      if (code && issuer && ASSET_CODE_RE.test(code) && isValidStellarEd25519PublicKey(issuer)) {
         return `${code}:${issuer}`;
       }
       return null;
@@ -86,7 +83,7 @@ export function extractAssetIdentity(intent: AgentIntent, rules?: PolicyRules): 
     const issuer = (intent as any).issuer;
     if (typeof code === "string" && typeof issuer === "string") {
       if (code.toUpperCase() === "XLM") return "XLM";
-      if (ASSET_CODE_RE.test(code) && isStellarPublicKey(issuer)) {
+      if (ASSET_CODE_RE.test(code) && isValidStellarEd25519PublicKey(issuer)) {
         return `trustline:${code}:${issuer}`;
       }
     }
