@@ -31,6 +31,8 @@
  *     traffic on a public interface by accident.
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createApiServer, API_VERSION } from "./index.js";
 import { TestnetLocalSigner, TESTNET_HORIZON_URL, TESTNET_SOROBAN_RPC_URL } from "@4evergent/stellar";
 import { DevAuthProvider, ProductionApiKeyAuthProvider } from "@4evergent/shared";
