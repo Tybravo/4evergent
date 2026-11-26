@@ -526,14 +526,14 @@ async function createTrustlineFixture(options: {
 
   const internals = pipeline as unknown as {
     builder: {
-      buildTrustline: (...args: any[]) => Promise<object>;
-      buildPayment: (...args: any[]) => Promise<object>;
+      buildTrustline: (..._args: any[]) => Promise<object>;
+      buildPayment: (..._args: any[]) => Promise<object>;
     };
     simulator: { simulate: () => Promise<object> };
   };
   internals.builder = {
     buildTrustline: options.buildTrustline
-      ? (...args: any[]) => options.buildTrustline!(calls)
+      ? (..._args: any[]) => options.buildTrustline!(calls)
       : async (..._args: any[]) => { calls.push("buildTrustline"); return { fakeTrustlineTx: true }; },
     buildPayment: async (..._args: any[]) => { calls.push("buildPayment"); return { fakePaymentTx: true }; },
   };
