@@ -463,3 +463,125 @@ test("executeApproved does not throw when linked activity record is missing on f
     assert.equal(savedActivity, null);
   });
 });
+
+// ---- Issue #44: trustline approval path ----
+
+import type { TrustlineIntent } from "@4evergent/shared";
+
+const TRUSTLINE_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
+const trustlineIntent: TrustlineIntent = {
+  type: "trustline",
+  assetCode: "USDC",
+  issuer: TRUSTLINE_ISSUER,
+  limit: "1000",
+  reason: "trustline approval test",
+};
+
+async function createTrustlineFixture(options: {
+  buildTrustline?: (calls: string[]) => Promise<object>;
+  simulate?: () => Promise<object>;
+} = {}) {
+  const activityStore = new InMemoryActivityStore();
+  const approvalStore = new InMemoryApprovalStore();
+  const decision: PolicyDecision = {
+    result: "requires_approval",
+    reason: "Requires human approval",
+    rule: "approvalThreshold",
+    intent: trustlineIntent,
+  };
+  const activity = createActivity("agent-1", "owner-1", trustlineIntent, decision);
+  activity.status = "requires_approval";
+  activity.authorizationStatus = "pending_approval";
+  await activityStore.record(activity);
+
+  const approval = createApproval(
+    activity.id,
+    "agent-1",
+    "owner-1",
+    trustlineIntent,
+    decision,
+    new Date(Date.now() + 60_000).toISOString(),
+  );
+  approval.status = "approved";
+  await approvalStore.record(approval);
+
+  const signer = new TestSigner();
+  const calls: string[] = [];
+
+  const pipeline = new TransactionPipeline({
+    horizonUrl: HORIZON_URL,
+    networkPassphrase: PASSPHRASE,
+    signer,
+    activityStore,
+    approvalStore,
+    policyRules: {
+      // trustline assets are keyed as `trustline:<code>:<issuer>` in the policy engine
+      allowedAssets: [`trustline:USDC:${TRUSTLINE_ISSUER}`],
+      requireHumanApprovalForAmountAbove: "100",
+      approvalThreshold: "100",
+      txTypeRestrictions: { trustline: true },
+    },
+  });
+
+  const internals = pipeline as unknown as {
+    builder: {
+      buildTrustline: (..._args: any[]) => Promise<object>;
+      buildPayment: (..._args: any[]) => Promise<object>;
+    };
+    simulator: { simulate: () => Promise<object> };
+  };
+  internals.builder = {
+    buildTrustline: options.buildTrustline
+      ? (..._args: any[]) => options.buildTrustline!(calls)
+      : async (..._args: any[]) => { calls.push("buildTrustline"); return { fakeTrustlineTx: true }; },
+    buildPayment: async (..._args: any[]) => { calls.push("buildPayment"); return { fakePaymentTx: true }; },
+  };
+  internals.simulator = {
+    simulate: options.simulate ?? (async () => ({
+      success: false, fee: "0", operations: 0, warnings: [],
+      error: "simulation_failed: mock network",
+    })),
+  };
+
+  return { pipeline, activityStore, approvalStore, approval, activity, signer, calls };
+}
+
+// AC1 + AC2 + AC4: approved trustline reaches simulation (not construction failure)
+test("executeApproved calls buildTrustline for a trustline intent and reaches simulation (#44)", async () => {
+  await withOfflineAccount(async () => {
+    const fixture = await createTrustlineFixture();
+    const result = await fixture.pipeline.executeApproved(fixture.approval.id, "reviewer-1");
+
+    // Must NOT be a construction failure
+    assert.notEqual(result.message, "Construction failed: expected payment intent, got trustline");
+    // Must reach simulation (fails for mock-network reason, not construction)
+    assert.equal(result.status, "simulation_failed");
+    // buildTrustline was called, not buildPayment
+    assert.ok(fixture.calls.includes("buildTrustline"), "buildTrustline should have been called");
+    assert.ok(!fixture.calls.includes("buildPayment"), "buildPayment should NOT have been called");
+  });
+});
+
+// AC3 + AC5: payment approval still calls buildPayment (no regression)
+test("executeApproved calls buildPayment for a payment intent and not buildTrustline (#44)", async () => {
+  await withOfflineAccount(async () => {
+    const calls: string[] = [];
+    const fixture = await createFixture({
+      buildPayment: async () => { calls.push("buildPayment"); return { fakePaymentTx: true }; },
+      simulate: async () => ({
+        success: false, fee: "0", operations: 0, warnings: [],
+        error: "simulation_failed: mock network",
+      }),
+    });
+
+    // Patch buildTrustline onto the builder as a spy
+    (fixture.pipeline as any).builder.buildTrustline = async () => { calls.push("buildTrustline"); return {}; };
+
+    const result = await fixture.pipeline.executeApproved(fixture.approval.id, "reviewer-1");
+
+    assert.equal(result.status, "simulation_failed");
+    assert.ok(calls.includes("buildPayment"), "buildPayment should have been called for payment intent");
+    assert.ok(!calls.includes("buildTrustline"), "buildTrustline should NOT have been called for payment intent");
+  });
+});
