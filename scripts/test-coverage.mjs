@@ -32,7 +32,7 @@ for (const [filter, label] of stacks) {
 
   const summaryLine = output
     .split(/\r?\n/)
-    .filter((line) => /^\s*(?:ℹ\s*)?all files\s*\|/i.test(line))
+    .filter((line) => /^\s*(?:[#ℹ]\s*)?all files\s*\|/i.test(line))
     .at(-1);
   results.push({ label, summaryLine: summaryLine?.trim() ?? 'Coverage summary unavailable' });
 
