@@ -49,7 +49,7 @@ is optional when the API is running in development authentication mode.
 4evergent agent pause <id>                  Pause agent (rejects new intents)
 4evergent agent resume <id>                 Resume agent (active)
 4evergent agent disable <id>                Disable agent
-4evergent approval list                     List pending approvals
+4evergent approval list [--status <status>] [--limit <limit> | <limit>]
 4evergent approval get <id>                 Show approval detail
 4evergent approval approve <id>             Approve an intent
 4evergent approval reject <id>              Reject an intent
@@ -66,6 +66,8 @@ is optional when the API is running in development authentication mode.
                                             Submit an intent (see Intent types below)
 4evergent completion <bash|zsh>             Generate shell completion script
 ```
+
+Without filters, `approval list` returns up to 50 approvals across all statuses. Set a limit from 1 to 200. Valid statuses are `pending_approval`, `approved`, `rejected`, `expired`, `executing`, `submitted`, `confirmed` and `failed`.
 
 ## Shell completion
 
@@ -215,7 +217,7 @@ CLI does not retry automatically — retry manually, using the SAME
 4evergent health
 4evergent agent list
 4evergent agent pause agent-123
-4evergent approval list
+4evergent approval list --status pending_approval --limit 10
 4evergent approval get ap-123
 4evergent approval approve ap-123
 4evergent execution list

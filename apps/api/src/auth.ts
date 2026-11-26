@@ -36,6 +36,7 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 import { getSharedConnection, closeSharedConnection } from "@4evergent/database";
 import type { AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { SlidingWindowRateLimiter, clientKey } from "./rate-limit.js";
+import { API_ERRORS } from "./error-codes.js";
 
 export const SESSION_COOKIE_NAME = "four_eg_session";
 
@@ -520,7 +521,7 @@ export function createAuthModule(opts: {
     const key = clientKey(req, trustProxy);
     const decision = limiter.check(key);
     if (decision.limited) {
-      sendJson(res, 429, { error: "rate_limited" }, { "Retry-After": String(decision.retryAfterSeconds) });
+      sendJson(res, 429, { code: "RATE_LIMITED", error: API_ERRORS.RATE_LIMITED.message }, { "Retry-After": String(decision.retryAfterSeconds) });
       return null;
     }
     return key;

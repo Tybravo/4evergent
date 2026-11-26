@@ -15,6 +15,7 @@ function statusLabel(status: ExecutionStatus): string {
     case 'failed': return 'Failed';
     case 'dead_letter': return 'Dead Letter';
     case 'cancelled': return 'Cancelled';
+    case 'requires_approval': return 'Requires Approval';
   }
 }
 
@@ -27,6 +28,7 @@ function statusClass(status: ExecutionStatus): string {
     case 'failed': return 'badge-err';
     case 'dead_letter': return 'badge-err';
     case 'cancelled': return 'badge-neutral';
+    case 'requires_approval': return 'badge-warn';
   }
 }
 
@@ -39,6 +41,7 @@ function statusDescription(status: ExecutionStatus): string | null {
     case 'failed': return 'Transaction failed on-chain.';
     case 'dead_letter': return 'Execution failed and will not be retried automatically.';
     case 'cancelled': return 'Execution was cancelled by operator and will not be retried.';
+    case 'requires_approval': return 'Execution is waiting for human approval before proceeding.';
   }
 }
 
@@ -167,6 +170,19 @@ export default function ExecutionDetail() {
           {' '}
           <Link to={`/agents/${execution.agentId}/activity/${execution.activityId}`} className="btn btn-ghost btn-sm">
             View Activity
+          </Link>
+        </div>
+      )}
+
+      {/* Cross-link to linked approval */}
+      {execution.approvalId && (
+        <div style={{ marginTop: 'var(--space-sm)', padding: 'var(--space-sm)', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
+          <span className="muted" style={{ fontSize: 'var(--text-sm)' }}>
+            Approval: <code>{execution.approvalId.slice(0, 8)}</code>
+          </span>
+          {' '}
+          <Link to={`/approvals/${execution.approvalId}`} className="btn btn-ghost btn-sm">
+            View Approval
           </Link>
         </div>
       )}

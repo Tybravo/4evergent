@@ -21,6 +21,7 @@ function statusLabel(status: ExecutionStatus): string {
     case 'failed': return 'Failed';
     case 'dead_letter': return 'Dead Letter';
     case 'cancelled': return 'Cancelled';
+    case 'requires_approval': return 'Requires Approval';
   }
 }
 
@@ -33,6 +34,7 @@ function statusClass(status: ExecutionStatus): string {
     case 'failed': return 'badge-err';
     case 'dead_letter': return 'badge-err';
     case 'cancelled': return 'badge-neutral';
+    case 'requires_approval': return 'badge-warn';
   }
 }
 

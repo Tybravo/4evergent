@@ -114,6 +114,30 @@ Stellar's native sequence numbers are used. Each transaction includes:
 - Timebounds (valid window)
 - (Future) Memo for intent correlation
 
+### Idempotency-Key replay window
+
+`POST /agents/:id/intents` honours an `Idempotency-Key` for a replay window
+(default 24 hours, `IDEMPOTENCY_KEY_WINDOW_SECONDS`) measured from the creation
+of the activity the key is bound to. See ADR-023.
+
+What the window protects against:
+- A client, proxy or network retry of the same request inside the window
+  executing a second time and moving value twice.
+- The same key reused inside the window with a different intent: refused with
+  `409`, so a key cannot be repurposed for another payment.
+
+What it does not protect against:
+- A retry sent after the window. It is treated as a new intent and executes
+  again (still subject to policy, spending limits and approval). Clients must
+  finish retrying inside the window.
+- Duplicates sent with different keys, or without a key. Spending limits and
+  approval policy are the controls there.
+- On-chain replay. That is Stellar's sequence numbers and timebounds, above.
+
+Expiry never deletes an activity record: the audit trail stays complete, and
+only the key's suppression ends (its `idempotency_key` is cleared when it is
+released).
+
 ## Spending Limits
 
 | Limit | Default | Scope |

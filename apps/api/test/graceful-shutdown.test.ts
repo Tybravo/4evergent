@@ -333,11 +333,22 @@ test("shutdown stops all background workers (scheduler, execution queue, reconci
 // ---------------------------------------------------------------------------
 
 test("regression: active in-flight HTTP request is allowed to finish during normal shutdown", async () => {
+  let onReqStarted!: () => void;
+  const reqStartedPromise = new Promise<void>((r) => { onReqStarted = r; });
+  let releaseReq!: () => void;
+  const releaseReqPromise = new Promise<void>((r) => { releaseReq = r; });
+
   const server = await createApiServer({
     port: 0,
     horizonUrl: "https://horizon-testnet.stellar.org",
     signer: new MockSigner(),
-    authProvider: new DevAuthProvider({ defaultOwnerId: "test" }),
+    authProvider: {
+      authenticate: async () => {
+        onReqStarted();
+        await releaseReqPromise;
+        return { ownerId: "test", subject: "test" };
+      },
+    },
   });
 
   await server.listen(0, "127.0.0.1");
@@ -355,17 +366,16 @@ test("regression: active in-flight HTTP request is allowed to finish during norm
 
   try {
     // Send a valid request
-    const requestPromise = fetch(`http://127.0.0.1:${port}/health`);
+    const requestPromise = fetch(`http://127.0.0.1:${port}/agents`);
 
-    // Wait a brief moment for the request socket to connect, then signal shutdown
-    await new Promise((r) => setTimeout(r, 2));
+    // Wait until the request has connected and entered handler, then signal shutdown
+    await reqStartedPromise;
     fakeProcess.emit("SIGTERM");
+    releaseReq();
 
     // The active request must succeed without socket hangup
     const res = await requestPromise;
     assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.status, "ok");
 
     // Allow shutdown to complete
     for (let i = 0; i < 25 && exitCode === null; i++) {
@@ -466,6 +476,9 @@ test("regression: in-flight queue executions finish within drain timeout", async
 test("regression: actual createApiServer() shutdown path force-exits with code 1 when drain deadline is exceeded, and 0 on normal shutdown", async () => {
   // Case 1: Active request hangs and exceeds drain deadline -> must force-exit with code 1
   {
+    let onCase1Started!: () => void;
+    const case1StartedPromise = new Promise<void>((r) => { onCase1Started = r; });
+
     const server = await createApiServer({
       port: 0,
       horizonUrl: "https://horizon-testnet.stellar.org",
@@ -473,6 +486,7 @@ test("regression: actual createApiServer() shutdown path force-exits with code 1
       authProvider: {
         authenticate: async ({ headers }) => {
           if (headers["x-hang"] === "true") {
+            onCase1Started();
             // Hang indefinitely to simulate an in-flight request exceeding drain deadline
             await new Promise(() => {});
           }
@@ -506,8 +520,8 @@ test("regression: actual createApiServer() shutdown path force-exits with code 1
         headers: { "x-hang": "true" },
       });
 
-      // Allow request socket to connect and enter handler
-      await new Promise((r) => setTimeout(r, 10));
+      // Wait until request has actually arrived at the server handler
+      await case1StartedPromise;
       fakeProcess.emit("SIGTERM");
 
       // The hanging connection must be destroyed when drain timeout expires
@@ -532,11 +546,22 @@ test("regression: actual createApiServer() shutdown path force-exits with code 1
 
   // Case 2: Normal graceful shutdown on actual createApiServer() exits with code 0
   {
+    let onCase2Started!: () => void;
+    const case2StartedPromise = new Promise<void>((r) => { onCase2Started = r; });
+    let releaseCase2!: () => void;
+    const releaseCase2Promise = new Promise<void>((r) => { releaseCase2 = r; });
+
     const server = await createApiServer({
       port: 0,
       horizonUrl: "https://horizon-testnet.stellar.org",
       signer: new MockSigner(),
-      authProvider: new DevAuthProvider({ defaultOwnerId: "test" }),
+      authProvider: {
+        authenticate: async () => {
+          onCase2Started();
+          await releaseCase2Promise;
+          return { ownerId: "test", subject: "test" };
+        },
+      },
     });
 
     await server.listen(0, "127.0.0.1");
@@ -555,10 +580,11 @@ test("regression: actual createApiServer() shutdown path force-exits with code 1
 
     try {
       // Send a request that finishes normally
-      const reqPromise = fetch(`http://127.0.0.1:${port}/health`);
-      await new Promise((r) => setTimeout(r, 2));
+      const reqPromise = fetch(`http://127.0.0.1:${port}/agents`);
+      await case2StartedPromise;
 
       fakeProcess.emit("SIGTERM");
+      releaseCase2();
 
       const res = await reqPromise;
       assert.equal(res.status, 200);
@@ -592,7 +618,7 @@ test("ambiguous submission recovery: executing record with txHash found on-chain
   const recoveryService = new ExecutionRecoveryService(store, {
     preCheck: async (txHash) => {
       assert.equal(txHash, "tx-hash-confirmed-1");
-      return "found";
+      return "confirmed";
     },
   });
 

@@ -14,6 +14,24 @@ export interface PolicyConfigStore {
   close?(): void;
 }
 
+/** A persisted policy exists but cannot be decoded safely. */
+export class CorruptPolicyConfigError extends Error {
+  readonly code = "POLICY_CONFIG_CORRUPT";
+
+  constructor() {
+    super("Stored policy configuration is unreadable");
+    this.name = "CorruptPolicyConfigError";
+  }
+}
+
+function parsePolicyRules(raw: string): PolicyRules {
+  try {
+    return JSON.parse(raw) as PolicyRules;
+  } catch {
+    throw new CorruptPolicyConfigError();
+  }
+}
+
 export class SQLitePolicyConfigStore implements PolicyConfigStore {
   private db: DatabaseSync;
   private dbPath: string;
@@ -47,11 +65,7 @@ export class SQLitePolicyConfigStore implements PolicyConfigStore {
       .prepare("SELECT rules_json FROM policy_configs WHERE agent_id = ?")
       .get(agentId) as { rules_json: string } | undefined;
     if (!row) return null;
-    try {
-      return JSON.parse(row.rules_json) as PolicyRules;
-    } catch {
-      return null;
-    }
+    return parsePolicyRules(row.rules_json);
   }
 
   async getForOwner(agentId: string, ownerId: string): Promise<PolicyRules | null> {
@@ -59,11 +73,7 @@ export class SQLitePolicyConfigStore implements PolicyConfigStore {
       .prepare("SELECT rules_json FROM policy_configs WHERE agent_id = ? AND owner_id = ?")
       .get(agentId, ownerId) as { rules_json: string } | undefined;
     if (!row) return null;
-    try {
-      return JSON.parse(row.rules_json) as PolicyRules;
-    } catch {
-      return null;
-    }
+    return parsePolicyRules(row.rules_json);
   }
 
   async getWithMetadata(agentId: string): Promise<{ rules: PolicyRules; version: number; updatedAt: string } | null> {
@@ -71,11 +81,7 @@ export class SQLitePolicyConfigStore implements PolicyConfigStore {
       .prepare("SELECT rules_json, version, updated_at FROM policy_configs WHERE agent_id = ?")
       .get(agentId) as { rules_json: string; version: number; updated_at: string } | undefined;
     if (!row) return null;
-    try {
-      return { rules: JSON.parse(row.rules_json) as PolicyRules, version: row.version, updatedAt: row.updated_at };
-    } catch {
-      return null;
-    }
+    return { rules: parsePolicyRules(row.rules_json), version: row.version, updatedAt: row.updated_at };
   }
 
   async upsert(agentId: string, ownerId: string, rules: PolicyRules): Promise<{ rules: PolicyRules; version: number }> {
@@ -118,10 +124,7 @@ export class SQLitePolicyConfigStore implements PolicyConfigStore {
     const rows = this.db
       .prepare("SELECT agent_id, rules_json FROM policy_configs WHERE owner_id = ?")
       .all(ownerId) as Array<{ agent_id: string; rules_json: string }>;
-    return rows.map((r) => ({
-      agentId: r.agent_id,
-      rules: JSON.parse(r.rules_json) as PolicyRules,
-    }));
+    return rows.map((r) => ({ agentId: r.agent_id, rules: parsePolicyRules(r.rules_json) }));
   }
 
   close(): void {

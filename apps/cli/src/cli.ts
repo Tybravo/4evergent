@@ -12,10 +12,11 @@
  *   FOREGENT_API_TIMEOUT_MS — Per-request timeout in ms (default: 5000)
  */
 
+import { parseArgs } from "node:util";
 import { exit } from "node:process";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
-import { COMMAND_TREE, COMMANDS_HELP, buildCommandTree, dispatchCommand } from "./commands.js";
+import { APPROVAL_LIST_USAGE, COMMAND_TREE, COMMANDS_HELP, buildCommandTree, dispatchCommand } from "./commands.js";
 import { generateCompletion } from "./completion.js";
 
 // The build replaces this lookup with the package version for a standalone CLI.
@@ -54,12 +55,63 @@ const API_TIMEOUT_MS = resolveApiTimeoutMs(process.env.FOREGENT_API_TIMEOUT_MS);
 // the documented timeout exit code without duplicating it in each catch block.
 let requestTimedOut = false;
 
+function formatApiErrorDetails(details: unknown): string {
+  if (details === undefined || details === null) return "";
+  if (typeof details === "string") {
+    const trimmed = details.trim();
+    return trimmed ? `\n  ${trimmed}` : "";
+  }
+  if (Array.isArray(details)) {
+    const lines = details
+      .filter((item): item is string | number | boolean =>
+        typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+      )
+      .map((item) => String(item).trim())
+      .filter((line) => line.length > 0);
+    return lines.length > 0 ? lines.map((line) => `\n  - ${line}`).join("") : "";
+  }
+  if (typeof details === "object") {
+    const lines: string[] = [];
+    for (const [key, value] of Object.entries(details as Record<string, unknown>)) {
+      if (value === undefined || value === null) continue;
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        lines.push(`\n  ${key}: ${value}`);
+      } else if (Array.isArray(value)) {
+        const scalars = value
+          .filter((item): item is string | number | boolean =>
+            typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+          )
+          .map((item) => String(item).trim())
+          .filter((item) => item.length > 0);
+        if (scalars.length > 0) {
+          lines.push(`\n  ${key}: ${scalars.join(", ")}`);
+        }
+      }
+    }
+    return lines.join("");
+  }
+  return "";
+}
+
 class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  public readonly code?: string;
+  public readonly details?: unknown;
+
+  constructor(public status: number, message: string, code?: string, details?: unknown) {
     // status 0 means "no HTTP response" (connection failure or timeout);
     // prefixing it with "HTTP 0:" would be misleading.
-    super(status === 0 ? message : `HTTP ${status}: ${message}`);
+    const normalizedCode = typeof code === "string" && code.trim() !== "" ? code.trim() : undefined;
+    const header =
+      status === 0
+        ? message
+        : normalizedCode
+          ? `HTTP ${status} [${normalizedCode}]: ${message}`
+          : `HTTP ${status}: ${message}`;
+    const formattedDetails = status === 0 ? "" : formatApiErrorDetails(details);
+    super(`${header}${formattedDetails}`);
     this.name = "ApiError";
+    this.code = normalizedCode;
+    this.details = details;
   }
 }
 
@@ -122,7 +174,8 @@ async function request(path: string, init: RequestInit = {}): Promise<ApiRespons
 
   if (!res.ok) {
     const msg = body?.error ?? body?.message ?? `Request failed`;
-    throw new ApiError(res.status, msg);
+    const code = typeof body?.code === "string" ? body.code : undefined;
+    throw new ApiError(res.status, msg, code, body?.details);
   }
 
   return { status: res.status, body };
@@ -190,9 +243,60 @@ async function cmdHealth() {
   }
 }
 
-async function cmdAgentList() {
+// GET /agents clamps limit to 1-200 and defaults to 200, so the CLI validates
+// the same range and omits the parameter entirely when the flag is absent.
+const AGENT_LIST_MAX_LIMIT = 200;
+const AGENT_LIST_USAGE =
+  "Usage: 4evergent agent list [--capability <capability>] [--limit <n>]";
+
+interface AgentListOptions {
+  capability?: string;
+  limit?: number;
+}
+
+/** Parses agent list flags, returning an error message for usage errors. */
+function parseAgentListArgs(args: string[]): AgentListOptions | string {
+  const options: AgentListOptions = {};
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--capability") {
+      const value = args[++i];
+      if (value === undefined || value === "") {
+        return `--capability requires a value.\n${AGENT_LIST_USAGE}`;
+      }
+      // Passed through unchanged: the API matches capabilities exactly and
+      // case-sensitively, so the CLI must not normalize the value.
+      options.capability = value;
+    } else if (arg === "--limit") {
+      const raw = args[++i];
+      const parsed = raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : NaN;
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > AGENT_LIST_MAX_LIMIT) {
+        return `Invalid --limit '${raw ?? ""}': expected an integer between 1 and ${AGENT_LIST_MAX_LIMIT}.\n${AGENT_LIST_USAGE}`;
+      }
+      options.limit = parsed;
+    } else {
+      return `Unknown argument: ${arg}\n${AGENT_LIST_USAGE}`;
+    }
+  }
+
+  return options;
+}
+
+async function cmdAgentList(args: string[] = []) {
+  const parsed = parseAgentListArgs(args);
+  if (typeof parsed === "string") {
+    console.error(parsed);
+    return 1;
+  }
+
+  const query = new URLSearchParams();
+  if (parsed.capability !== undefined) query.set("capability", parsed.capability);
+  if (parsed.limit !== undefined) query.set("limit", String(parsed.limit));
+  const qs = query.toString();
+
   try {
-    const { body } = await request("/agents");
+    const { body } = await request(`/agents${qs ? `?${qs}` : ""}`);
     if (!body.agents || body.agents.length === 0) {
       console.log("No agents found.");
       return 0;
@@ -309,9 +413,39 @@ async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "di
   }
 }
 
-async function cmdApprovalList() {
+const approvalStatuses = ["pending_approval", "approved", "rejected", "expired", "executing", "submitted", "confirmed", "failed"];
+
+async function cmdApprovalList(args: string[]) {
+  const params = new URLSearchParams();
   try {
-    const { body } = await request("/approvals");
+    const { values, positionals } = parseArgs({
+      args,
+      options: { status: { type: "string" }, limit: { type: "string" } },
+      allowPositionals: true,
+    });
+    if (values.status !== undefined) {
+      if (!approvalStatuses.includes(values.status)) {
+        throw new Error(`status must be one of: ${approvalStatuses.join(", ")}`);
+      }
+      params.set("status", values.status);
+    }
+    if (positionals.length > 1 || (positionals.length && values.limit !== undefined)) {
+      throw new Error("Specify the limit once, either as --limit or as a positional argument.");
+    }
+    const limit = values.limit ?? positionals[0];
+    if (limit !== undefined) {
+      if (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200) {
+        throw new Error("limit must be an integer between 1 and 200");
+      }
+      params.set("limit", String(Number(limit)));
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    console.error(APPROVAL_LIST_USAGE);
+    return 1;
+  }
+  try {
+    const { body } = await request(params.size ? `/approvals?${params}` : "/approvals");
     if (!body.approvals || body.approvals.length === 0) {
       console.log("No approvals found.");
       return 0;
@@ -347,9 +481,15 @@ async function cmdApprovalAction(approvalId: string, action: "approve" | "reject
   }
 }
 
-async function cmdExecutionList() {
+async function cmdExecutionList(limit?: string) {
+  const n = Number(limit || "100");
+  if (!Number.isInteger(n) || n < 1 || n > 100) {
+    console.error("Usage: 4evergent execution list [limit]");
+    console.error("limit must be an integer between 1 and 100");
+    return 1;
+  }
   try {
-    const { body } = await request("/executions?limit=100");
+    const { body } = await request(`/executions?limit=${n}`);
     const all: any[] = body.executions ?? [];
     if (all.length === 0) {
       console.log("No executions found.");
@@ -1057,7 +1197,7 @@ const argv = process.argv.slice(2);
 export const dispatcherTree = buildCommandTree({
   health: () => cmdHealth(),
   agent: {
-    list: () => cmdAgentList(),
+    list: (args) => cmdAgentList(args),
     get: (args) => cmdAgentGet(args[0] ?? ""),
     create: (args) => cmdAgentCreate(args),
     pause: (args) => cmdAgentStatus(args[0] ?? "", "paused"),
@@ -1068,13 +1208,13 @@ export const dispatcherTree = buildCommandTree({
     },
   },
   approval: {
-    list: () => cmdApprovalList(),
+    list: cmdApprovalList,
     get: (args) => cmdApprovalGet(args[0] ?? ""),
     approve: (args) => cmdApprovalAction(args[0] ?? "", "approve"),
     reject: (args) => cmdApprovalAction(args[0] ?? "", "reject"),
   },
   execution: {
-    list: () => cmdExecutionList(),
+    list: (args) => cmdExecutionList(args[0] ?? ""),
     get: (args) => cmdExecutionGet(args[0] ?? ""),
     retry: (args) => cmdExecutionRetry(args[0] ?? ""),
     cancel: (args) => cmdExecutionCancel(args[0] ?? ""),

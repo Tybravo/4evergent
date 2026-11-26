@@ -35,6 +35,23 @@ binding, the single-process in-memory state, and session persistence — are
 recorded as ADRs 016–019 in [architecture.md](architecture.md). Rate limiting
 for the login endpoints is ADR-020 (Proposed).
 
+When the per-source request budget is exhausted, the auth gate returns HTTP
+`429` with the standard `{ code, error }` envelope and a `Retry-After` header
+indicating how many seconds to wait before retrying:
+
+```json
+{"code":"RATE_LIMITED","error":"rate_limited"}
+```
+
+The authenticated, money-moving endpoints have their own per-owner limit
+(#261): `POST /agents/:id/intents` and the approve / reject actions. Each
+endpoint has a separate budget (60 requests per owner per 60 seconds by
+default), so intent traffic cannot lock an owner out of approvals. Past the
+limit the endpoint returns the same `429` with `Retry-After` and the
+`RATE_LIMITED` envelope as the auth gate. Limits are per owner, never global
+across owners, and are configurable with `API_RATE_LIMIT_MAX`,
+`API_RATE_LIMIT_WINDOW_SECONDS` and `API_RATE_LIMIT_MAX_KEYS`.
+
 ### GET /auth/config
 
 Public. Returns which login methods the server has enabled:
@@ -152,6 +169,7 @@ the approval fields (`approvalId`, `activityId`, `status`, `message`). Request b
 | `SCHEDULE_INVALID_TRANSITION` | 409 | The schedule status does not allow the requested pause, resume or disable. |
 | `EXECUTION_CONFLICT` | 409 | The execution changed concurrently. |
 | `APPROVAL_EXPIRED` | 410 | The approval passed its expiry before it was approved. |
+| `RATE_LIMITED` | 429 | Too many requests from this source. Retry after the number of seconds in the `Retry-After` response header. |
 
 ---
 
@@ -263,6 +281,50 @@ Match semantics:
 
 Get one agent (owner-scoped). `404` if not found or not owned.
 
+### PATCH /agents/:id
+
+Update an agent's mutable metadata. Auth: owner-scoped; a caller who does not
+own the agent gets the same `404` as for a nonexistent agent.
+
+Body: a JSON object with **at least one** of the fields below (all three may
+be sent together).
+
+| Field | Type | Rules |
+|---|---|---|
+| `displayName` | string | Optional; when supplied, non-empty after trimming and ≤100 characters (trimmed). Stored trimmed. |
+| `description` | string | Optional; may be empty; ≤500 characters. |
+| `capabilities` | string[] | Optional; ≤32 entries; each entry non-empty after trimming, ≤32 characters, and unique after trimming. The stored list is the trimmed list. |
+
+The capability caps are the same numeric limits the on-chain
+`agent-registry` contract enforces (`MAX_CAPABILITIES = 32`,
+`MAX_CAPABILITY_LEN = 32` in `contracts/agent-registry/src/lib.rs`), so an
+agent accepted here can be registered on-chain without tripping them. Two
+differences remain, and are intentional: this endpoint trims entries before
+checking length/uniqueness (the contract compares exact bytes, untrimmed), and
+it caps `displayName` at 100 characters while the contract allows 128 bytes.
+On-chain lengths are UTF-8 bytes whereas this endpoint measures UTF-16 code
+units, so a capability made of multi-byte characters can pass here and still
+be rejected on-chain.
+
+Fields that are **rejected** with `400 VALIDATION_ERROR`:
+
+- `status` — use `PATCH /agents/:id/status` instead.
+- `stellarAddress` — immutable. It binds the agent to a Stellar signer/account,
+  so changing it would repoint the agent's signing identity; register a new
+  agent with the desired address instead.
+- Any other field (`id`, `ownerId`, `active`, `metadata`, or a typo such as
+  `displayname`). Unknown fields are rejected rather than ignored, so a
+  misspelled field cannot silently do nothing.
+
+Responses:
+
+- `200` → `{ "agent": AgentRecord }` with the updated record. The same values
+  are returned by a subsequent `GET /agents/:id`.
+- `400` → invalid JSON; body not an object; no updatable field supplied; a
+  supplied field fails the rules above; `status`, `stellarAddress`, or an
+  unknown field present.
+- `404` → agent does not exist or is not owned by the caller.
+
 ### PATCH /agents/:id/status
 
 Body: `{ "status": "active" | "paused" | "disabled" }`
@@ -300,6 +362,21 @@ Body: an `AgentIntent` union member (`packages/shared/src/types.ts`):
 Headers: optional `Idempotency-Key` (≤256 chars, scoped to owner+agent).
 Same key + same intent → returns the original activity (`200`).
 Same key + different intent → `409`.
+
+Replay window: a key is honoured for **24 hours** from the creation of the
+activity it is bound to. Change it with `IDEMPOTENCY_KEY_WINDOW_SECONDS`
+(default `86400`; an unset, zero, negative or non-numeric value falls back to
+the default), or with the `idempotencyKeyWindowMs` server option.
+
+- Inside the window, both rules above apply: no second execution, no second
+  value movement.
+- After the window, the key is treated as new: the request is evaluated and
+  executed as a fresh intent, with a new activity. The earlier activity is kept
+  in the activity log; only its key stops suppressing requests.
+- Clients should finish retrying well inside the window. To repeat a payment on
+  purpose, send a new key rather than waiting for an old one to expire.
+- The window is anchored to the original activity's creation time, not the time
+  of the last retry, so retrying does not extend it.
 
 Agent status admission: the agent must be `active`. A `paused` or
 `disabled` agent rejects new intents before any activity, approval,
@@ -394,7 +471,9 @@ Returns `{ "agentId", "approvals": ApprovalRecord[] }`.
 ### GET /agents/:id/activity
 
 List activity records for an agent (owner-scoped).
-Query: `?limit=` (default 50, clamped 1–100).
+Query: `?limit=` (default 50, clamped 1–100), `?status=` optional filter
+(`pending`, `rejected`, `requires_approval`, `approved`, `signed`, `submitted`,
+`failed`); an invalid status returns `400 VALIDATION_ERROR`.
 Returns `{ "agentId", "activity": ActivityRecord[] }`.
 
 ### GET /agents/:id/activity/:activityId
@@ -508,7 +587,9 @@ validator's error message. `201` → `{ "schedule": ScheduleRecord }`.
 ### GET /agents/:id/schedules
 
 List schedules for an agent (owner-scoped). Query: `?limit=`
-(default 50, clamped 1–100). Returns `{ "agentId", "schedules": [] }`.
+(default 50, clamped 1–100), `?status=` optional filter (`active`, `paused`,
+`disabled`); an invalid status returns `400 VALIDATION_ERROR`.
+Returns `{ "agentId", "schedules": [] }`.
 
 ### GET /agents/:id/schedules/:scheduleId
 
@@ -636,6 +717,7 @@ Query parameters:
 | Parameter | Default | Max | Description |
 |---|---|---|---|
 | `limit` | `50` | `100` | Maximum number of records to return. Values outside 1–100 are clamped. |
+| `status` | — | — | Optional filter (`pending`, `rejected`, `requires_approval`, `approved`, `signed`, `submitted`, `failed`). An invalid status returns `400 VALIDATION_ERROR`. |
 
 Response `200`:
 

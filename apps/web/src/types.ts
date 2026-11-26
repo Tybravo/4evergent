@@ -97,7 +97,8 @@ export type ExecutionStatus =
   | "confirmed"
   | "failed"
   | "dead_letter"
-  | "cancelled";
+  | "cancelled"
+  | "requires_approval";
 
 export interface ExecutionRecord {
   id: string;

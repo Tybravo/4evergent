@@ -49,6 +49,8 @@ export interface CommandDef {
 
 export type CommandTree = Record<string, CommandDef>;
 
+export const APPROVAL_LIST_USAGE = "Usage: 4evergent approval list [--status <status>] [--limit <limit> | <limit>]";
+
 export const INTENT_TYPES = ["payment", "trustline", "contract_call", "account_settings"] as const;
 export type IntentType = (typeof INTENT_TYPES)[number];
 
@@ -58,7 +60,7 @@ export type SupportedShell = (typeof SUPPORTED_SHELLS)[number];
 export interface CommandTreeHandlers {
   health: () => Promise<number> | number;
   agent: {
-    list: () => Promise<number> | number;
+    list: (args: string[]) => Promise<number> | number;
     get: (args: string[]) => Promise<number> | number;
     create: (args: string[]) => Promise<number> | number;
     pause: (args: string[]) => Promise<number> | number;
@@ -66,13 +68,13 @@ export interface CommandTreeHandlers {
     disable: (args: string[]) => Promise<number> | number;
   };
   approval: {
-    list: () => Promise<number> | number;
+    list: (args: string[]) => Promise<number> | number;
     get: (args: string[]) => Promise<number> | number;
     approve: (args: string[]) => Promise<number> | number;
     reject: (args: string[]) => Promise<number> | number;
   };
   execution: {
-    list: () => Promise<number> | number;
+    list: (args: string[]) => Promise<number> | number;
     get: (args: string[]) => Promise<number> | number;
     retry: (args: string[]) => Promise<number> | number;
     cancel: (args: string[]) => Promise<number> | number;
@@ -119,13 +121,15 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
       description: "Manage agents and their status",
       usage:
         "Usage: 4evergent agent <list|get|create|pause|resume|disable> [id]\n" +
+        "       4evergent agent list [--capability <capability>] [--limit <n>]\n" +
         "       4evergent agent disable <id> [--force|--yes]",
       reportUnknownSubcommand: true,
       subcommands: {
         list: {
           name: "list",
           description: "List your agents",
-          run: handlers ? () => handlers.agent.list() : undefined,
+          flags: ["--capability", "--limit"],
+          run: handlers ? (args) => handlers.agent.list(args) : undefined,
         },
         get: {
           name: "get",
@@ -173,8 +177,11 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
       subcommands: {
         list: {
           name: "list",
-          description: "List pending approvals",
-          run: handlers ? () => handlers.approval.list() : undefined,
+          description: "List approvals, optionally filtered by status",
+          usage: APPROVAL_LIST_USAGE,
+          args: [{ name: "limit", description: "Maximum approvals (1-200, default 50)", optional: true }],
+          flags: ["--status", "--limit"],
+          run: handlers?.approval.list,
         },
         get: {
           name: "get",
@@ -206,7 +213,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
           name: "list",
           description: "List executions across all agents",
           args: [{ name: "limit", description: "Max executions to list", optional: true }],
-          run: handlers ? () => handlers.execution.list() : undefined,
+          run: handlers ? (args) => handlers.execution.list(args) : undefined,
         },
         get: {
           name: "get",

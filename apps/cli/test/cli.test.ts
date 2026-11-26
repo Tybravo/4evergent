@@ -203,7 +203,55 @@ test("CLI: agent list → prints agents", () => {
   assert.match(r.stdout, /agent-1/);
   assert.match(r.stdout, /Test Agent/);
   assert.match(r.stdout, /active/);
+  // No flags: the request stays exactly the same as before filtering existed.
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0].path, "/agents");
 });
+
+test("CLI: agent list --capability sends the exact capability query parameter", () => {
+  const r = run(["agent", "list", "--capability", "payment"], {
+    responses: [
+      { match: "/agents?capability=payment", status: 200, body: { agents: [{ id: "agent-1", displayName: "Test Agent", status: "active" }] } },
+    ],
+  });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /agent-1/);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0].method, "GET");
+  assert.equal(r.requests[0].path, "/agents?capability=payment");
+});
+
+test("CLI: agent list --capability does not normalize case", () => {
+  const r = run(["agent", "list", "--capability", "Payment"], {
+    responses: [
+      { match: "/agents?capability=Payment", status: 200, body: { agents: [] } },
+    ],
+  });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /No agents found/);
+  assert.equal(r.requests[0].path, "/agents?capability=Payment");
+});
+
+test("CLI: agent list --limit sends the limit query parameter", () => {
+  const r = run(["agent", "list", "--limit", "10"], {
+    responses: [
+      { match: "/agents?limit=10", status: 200, body: { agents: [{ id: "agent-1", displayName: "Test Agent", status: "active" }] } },
+    ],
+  });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /agent-1/);
+  assert.equal(r.requests[0].path, "/agents?limit=10");
+});
+
+for (const invalidLimit of ["0", "201", "abc"]) {
+  test(`CLI: agent list --limit ${invalidLimit} exits 1 without calling the API`, () => {
+    const r = run(["agent", "list", "--limit", invalidLimit], { responses: [] });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /Invalid --limit/);
+    assert.match(r.stderr, /Usage: 4evergent agent list/);
+    assert.equal(r.requests.length, 0);
+  });
+}
 
 test("CLI: agent get → prints details", () => {
   const r = run(["agent", "get", "agent-1"], {
@@ -262,8 +310,33 @@ test("CLI: approval list → prints approvals", () => {
     ],
   });
   assert.equal(r.code, 0);
+  assert.equal(r.requests[0]?.path, "/approvals");
   assert.match(r.stdout, /ap-123/);
   assert.match(r.stdout, /pending_approval/);
+});
+
+test("CLI: approval list sends status and either form of limit", () => {
+  for (const [args, path] of [
+    [["--status", "pending_approval"], "/approvals?status=pending_approval"],
+    [["--limit", "200", "--status", "approved"], "/approvals?status=approved&limit=200"],
+    [["10"], "/approvals?limit=10"],
+  ] as const) {
+    const r = run(["approval", "list", ...args], {
+      responses: [{ match: path, status: 200, body: { approvals: [] } }],
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.requests[0]?.method, "GET");
+    assert.equal(r.requests[0]?.path, path);
+  }
+});
+
+test("CLI: approval list rejects invalid filters before making a request", () => {
+  for (const args of [["--status", "unknown"], ["--status"], ["--limit", "201"], ["0"], ["1.5"], ["2", "--limit", "3"]]) {
+    const r = run(["approval", "list", ...args]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /Usage: 4evergent approval list/);
+    assert.equal(r.requests.length, 0);
+  }
 });
 
 test("CLI: approval approve → exit 0", () => {
@@ -358,13 +431,48 @@ test("CLI: execution list → empty result", () => {
   assert.match(r.stdout, /No executions found/);
 });
 
-test("CLI: execution list → limit passed as query param", () => {
+test("CLI: execution list → default limit 100 passed as query param", () => {
   const r = run(["execution", "list"], {
     responses: [
       { match: "/executions?limit=100", status: 200, body: { executions: [] } },
     ],
   });
   assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.path, "/executions?limit=100");
+});
+
+test("CLI: execution list with positional limit → passes query param", () => {
+  const r = run(["execution", "list", "10"], {
+    responses: [
+      { match: "/executions?limit=10", status: 200, body: { executions: [] } },
+    ],
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.path, "/executions?limit=10");
+});
+
+test("CLI: execution list with invalid limit string → exits 1 with usage", () => {
+  const r = run(["execution", "list", "abc"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /Usage: 4evergent execution list/);
+  assert.match(r.stderr, /limit must be an integer between 1 and 100/);
+});
+
+test("CLI: execution list out-of-bounds limit (0 and 101) → exits 1 with usage", () => {
+  const r0 = run(["execution", "list", "0"]);
+  assert.equal(r0.code, 1);
+  assert.equal(r0.requests.length, 0);
+  assert.match(r0.stderr, /Usage: 4evergent execution list/);
+  assert.match(r0.stderr, /limit must be an integer between 1 and 100/);
+
+  const r101 = run(["execution", "list", "101"]);
+  assert.equal(r101.code, 1);
+  assert.equal(r101.requests.length, 0);
+  assert.match(r101.stderr, /Usage: 4evergent execution list/);
+  assert.match(r101.stderr, /limit must be an integer between 1 and 100/);
 });
 
 test("CLI: execution list → API error → exit 1", () => {
@@ -1269,6 +1377,7 @@ interface CliHandlersModule {
   cmdScheduleDisable: (agentId: string, scheduleId: string) => Promise<number>;
   cmdScheduleDelete: (agentId: string, scheduleId: string, force?: boolean) => Promise<number>;
   cmdApprovalGet: (id: string) => Promise<number>;
+  cmdExecutionList: (limit?: string) => Promise<number>;
   confirmDestructiveAction: (
     target: string,
     consequence: string,
@@ -1299,6 +1408,7 @@ function loadCliHandlers(): Promise<CliHandlersModule> {
   cmdScheduleDisable,
   cmdScheduleDelete,
   cmdApprovalGet,
+  cmdExecutionList,
   confirmDestructiveAction,
 };\n`
       );
@@ -1647,6 +1757,40 @@ test("cmdActivityList: GET /agents/:id/activity?limit= with default and explicit
   const invalidLimit = await runHandlerWithMockFetch([], (m) => m.cmdActivityList("agent-1", "101"));
   assert.equal(invalidLimit.code, 1);
   assert.equal(invalidLimit.requests.length, 0);
+});
+
+test("cmdExecutionList: GET /executions?limit= with default and explicit limit, validates input", async () => {
+  const defaultLimit = await runHandlerWithMockFetch(
+    [{ match: "/executions?limit=100", status: 200, body: { executions: [] } }],
+    (m) => m.cmdExecutionList()
+  );
+  assert.equal(defaultLimit.code, 0);
+  assert.equal(defaultLimit.requests.length, 1);
+  assert.equal(defaultLimit.requests[0]!.method, "GET");
+  assert.equal(defaultLimit.requests[0]!.path, "/executions?limit=100");
+
+  const customLimit = await runHandlerWithMockFetch(
+    [{ match: "/executions?limit=10", status: 200, body: { executions: [] } }],
+    (m) => m.cmdExecutionList("10")
+  );
+  assert.equal(customLimit.code, 0);
+  assert.equal(customLimit.requests.length, 1);
+  assert.equal(customLimit.requests[0]!.method, "GET");
+  assert.equal(customLimit.requests[0]!.path, "/executions?limit=10");
+
+  const invalidAlpha = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("abc"));
+  assert.equal(invalidAlpha.code, 1);
+  assert.equal(invalidAlpha.requests.length, 0);
+  assert.match(invalidAlpha.stderr, /Usage: 4evergent execution list/);
+  assert.match(invalidAlpha.stderr, /limit must be an integer between 1 and 100/);
+
+  const invalidZero = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("0"));
+  assert.equal(invalidZero.code, 1);
+  assert.equal(invalidZero.requests.length, 0);
+
+  const invalidOver = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("101"));
+  assert.equal(invalidOver.code, 1);
+  assert.equal(invalidOver.requests.length, 0);
 });
 
 test("cmdAgentCreate: POST /agents with parsed displayName, description, capabilities, and stellarAddress", async () => {
@@ -2040,6 +2184,81 @@ test("CLI: --help documents --issuer option", () => {
   const r = run(["--help"]);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /--issuer/);
+});
+
+test("CLI: policy update 400 VALIDATION_ERROR prints code and per-field details", () => {
+  const r = run(["policy", "update", "agent-1", "--rules", '{"maxTxAmount":{"XLM":0}}'], {
+    responses: [
+      {
+        match: "/agents/agent-1/policy",
+        status: 400,
+        body: {
+          code: "VALIDATION_ERROR",
+          error: "invalid policy",
+          details: [
+            "maxTxAmount.XLM must be a positive number, got 0",
+            "dailyLimit.XLM must be a positive number, got -5",
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /HTTP 400 \[VALIDATION_ERROR\]: invalid policy/);
+  assert.match(r.stderr, /maxTxAmount\.XLM must be a positive number, got 0/);
+  assert.match(r.stderr, /dailyLimit\.XLM must be a positive number, got -5/);
+  assert.doesNotMatch(r.stderr, /\["maxTxAmount/);
+});
+
+test("CLI: agent status transition 409 prints code and current/requested status", () => {
+  const r = run(["agent", "resume", "agent-1"], {
+    responses: [
+      {
+        match: "/agents/agent-1/status",
+        status: 409,
+        body: {
+          code: "AGENT_STATUS_INVALID_TRANSITION",
+          error: "Agent status does not allow this transition",
+          details: {
+            currentStatus: "disabled",
+            requestedStatus: "active",
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.match(
+    r.stderr,
+    /HTTP 409 \[AGENT_STATUS_INVALID_TRANSITION\]: Agent status does not allow this transition/
+  );
+  assert.match(r.stderr, /currentStatus: disabled/);
+  assert.match(r.stderr, /requestedStatus: active/);
+  assert.doesNotMatch(r.stderr, /\{"currentStatus"/);
+});
+
+test("CLI: API error without server code does not invent one", () => {
+  const r = run(["agent", "get", "missing-agent"], {
+    responses: [
+      {
+        match: "/agents/missing-agent",
+        status: 404,
+        body: { error: "Agent not found" },
+      },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /HTTP 404: Agent not found/);
+  assert.doesNotMatch(r.stderr, /HTTP 404 \[/);
+});
+
+test("CLI: API error timeout still exits with code 3", () => {
+  const r = run(["agent", "list"], {
+    hang: true,
+    env: { FOREGENT_API_TIMEOUT_MS: "100" },
+  });
+  assert.equal(r.code, 3);
+  assert.match(r.stderr, /Request timed out/);
 });
 
 // ===== Help paths (#349) =====
