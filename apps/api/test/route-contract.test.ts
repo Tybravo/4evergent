@@ -299,6 +299,7 @@ const ROUTES: RouteContract[] = [
     sample: (ids) => ({ path: `/agents/${ids.agentId}/executions` }),
   },
   { method: "GET", path: "/activity", auth: "protected", status: 200, keys: ["activity", "hasMore"], list: true },
+  { method: "GET", path: "/schedules", auth: "protected", status: 200, keys: ["schedules", "hasMore"], list: true },
   { method: "GET", path: "/approvals", auth: "protected", status: 200, keys: ["approvals", "hasMore"], list: true },
   {
     method: "GET",
