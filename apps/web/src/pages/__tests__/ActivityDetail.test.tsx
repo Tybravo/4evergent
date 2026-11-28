@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ActivityDetail from '../ActivityDetail';
@@ -115,5 +115,51 @@ describe('ActivityDetail', () => {
       expect(screen.getByText('Error')).toBeInTheDocument();
     });
     expect(screen.getByText('Transaction failed: insufficient funds')).toBeInTheDocument();
+  });
+
+  it('renders back button that navigates when clicked', async () => {
+    mockApi.activityDetail.mockResolvedValue({ activity: makeActivity() });
+    
+    render(
+      <MemoryRouter initialEntries={['/list', '/agents/agent-a/activity/act-1']} initialIndex={1}>
+        <Routes>
+          <Route path="/list" element={<div>Activity List</div>} />
+          <Route path="/agents/:agentId/activity/:activityId" element={<ActivityDetail />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('act-1')).toBeInTheDocument();
+    });
+
+    const backButton = screen.getByRole('button', { name: /back/i });
+    fireEvent.click(backButton);
+
+    // Should navigate back to previous entry
+    await waitFor(() => {
+      expect(screen.getByText('Activity List')).toBeInTheDocument();
+    });
+  });
+
+  it('calls reload when retry button is clicked after error', async () => {
+    mockApi.activityDetail
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockResolvedValueOnce({ activity: makeActivity() });
+    
+    renderDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText('Network error')).toBeInTheDocument();
+    });
+
+    const retryButton = screen.getByRole('button', { name: /retry/i });
+    fireEvent.click(retryButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('act-1')).toBeInTheDocument();
+    });
+
+    expect(mockApi.activityDetail).toHaveBeenCalledTimes(2);
   });
 });
