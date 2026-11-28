@@ -244,6 +244,25 @@ describe('useApiResource', () => {
     expect(fetcher2).toHaveBeenCalledTimes(1);
   });
 
+  it('reload() does nothing when called after unmount', async () => {
+    const fetcher = vi.fn(() => Promise.resolve('data'));
+    const { result, unmount } = renderHook(() => useApiResource(fetcher, []));
+
+    // Wait for initial fetch
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBe('data');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Unmount
+    unmount();
+
+    // Try to reload after unmount
+    await result.current.reload();
+
+    // Fetcher should not be called again
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps previous data during reload to avoid UI flicker', async () => {
     type Deferred<T> = {
       promise: Promise<T>;

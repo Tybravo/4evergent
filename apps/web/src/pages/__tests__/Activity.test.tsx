@@ -180,4 +180,138 @@ describe('Activity page', () => {
     expect(screen.getByText('agent-deleted-9999')).toBeInTheDocument();
     expect(mockListAllAgents).toHaveBeenCalledTimes(1);
   });
+
+  it('calls loadMore to fetch additional pages', async () => {
+    // Initial page
+    mockListActivity.mockResolvedValueOnce({
+      activity: [
+        {
+          id: 'act-1',
+          agentId: 'agent-a',
+          ownerId: 'owner-a',
+          intent: { type: 'payment', asset: 'XLM', amount: '10', destination: 'G...', reason: 'test' },
+          policyDecision: { result: 'allow', reason: 'ok', rule: 'test', intent: {} as any },
+          authorizationStatus: null,
+          simulationResult: null,
+          txHash: null,
+          status: 'submitted',
+          error: null,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      hasMore: true,
+    });
+
+    // Second page
+    mockListActivity.mockResolvedValueOnce({
+      activity: [
+        {
+          id: 'act-2',
+          agentId: 'agent-b',
+          ownerId: 'owner-a',
+          intent: { type: 'payment', asset: 'XLM', amount: '20', destination: 'G...', reason: 'test2' },
+          policyDecision: { result: 'allow', reason: 'ok', rule: 'test', intent: {} as any },
+          authorizationStatus: null,
+          simulationResult: null,
+          txHash: null,
+          status: 'confirmed',
+          error: null,
+          createdAt: '2026-01-01T00:00:01Z',
+          updatedAt: '2026-01-01T00:00:01Z',
+        },
+      ],
+      hasMore: false,
+    });
+
+    render(<MemoryRouter><Activity /></MemoryRouter>);
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(screen.getByText('act-1'.slice(0, 8))).toBeInTheDocument();
+    });
+
+    // Click Load More
+    const loadMoreButton = screen.getByRole('button', { name: /load more/i });
+    fireEvent.click(loadMoreButton);
+
+    // Wait for second page to load
+    await waitFor(() => {
+      expect(screen.getByText('act-2'.slice(0, 8))).toBeInTheDocument();
+    });
+
+    expect(mockListActivity).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles loadMore error and shows retry button', async () => {
+    // Initial page succeeds
+    mockListActivity.mockResolvedValueOnce({
+      activity: [
+        {
+          id: 'act-1',
+          agentId: 'agent-a',
+          ownerId: 'owner-a',
+          intent: { type: 'payment', asset: 'XLM', amount: '10', destination: 'G...', reason: 'test' },
+          policyDecision: { result: 'allow', reason: 'ok', rule: 'test', intent: {} as any },
+          authorizationStatus: null,
+          simulationResult: null,
+          txHash: null,
+          status: 'submitted',
+          error: null,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      hasMore: true,
+    });
+
+    // Load more fails
+    mockListActivity.mockRejectedValueOnce(new Error('Network timeout'));
+
+    // Retry succeeds
+    mockListActivity.mockResolvedValueOnce({
+      activity: [
+        {
+          id: 'act-2',
+          agentId: 'agent-b',
+          ownerId: 'owner-a',
+          intent: { type: 'payment', asset: 'XLM', amount: '20', destination: 'G...', reason: 'test2' },
+          policyDecision: { result: 'allow', reason: 'ok', rule: 'test', intent: {} as any },
+          authorizationStatus: null,
+          simulationResult: null,
+          txHash: null,
+          status: 'confirmed',
+          error: null,
+          createdAt: '2026-01-01T00:00:01Z',
+          updatedAt: '2026-01-01T00:00:01Z',
+        },
+      ],
+      hasMore: false,
+    });
+
+    render(<MemoryRouter><Activity /></MemoryRouter>);
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(screen.getByText('act-1'.slice(0, 8))).toBeInTheDocument();
+    });
+
+    // Click Load More
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+
+    // Wait for error message
+    await waitFor(() => {
+      expect(screen.getByText('Network timeout')).toBeInTheDocument();
+    });
+
+    // Click Retry
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // Wait for second page to load
+    await waitFor(() => {
+      expect(screen.getByText('act-2'.slice(0, 8))).toBeInTheDocument();
+    });
+
+    expect(mockListActivity).toHaveBeenCalledTimes(3);
+  });
 });
