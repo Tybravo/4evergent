@@ -1,5 +1,6 @@
 import { Horizon, rpc, type Asset, type Transaction } from "@stellar/stellar-sdk";
 import type { SimulationResult } from "@4evergent/shared";
+import { abortError, withAbortSignal } from "./abort.js";
 
 export const DEFAULT_SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
 
@@ -75,7 +76,14 @@ export class StellarSimulator {
     }
   }
 
-  async simulate(transaction: Transaction): Promise<SimulationOutcome> {
+  /**
+   * Every network call below (Horizon base fee/accounts, Soroban RPC
+   * simulation) is raced against `signal`. The SDK has no signal-aware request
+   * path, so this is a bounded wait: an abort rejects promptly with AbortError
+   * and the caller never waits on a hung request. The in-flight request itself
+   * cannot be cancelled, but its result is discarded after abort.
+   */
+  async simulate(transaction: Transaction, signal?: AbortSignal): Promise<SimulationOutcome> {
     const ops = transaction.operations.length;
 
     try {
@@ -85,19 +93,23 @@ export class StellarSimulator {
       return fail(transaction.fee, ops, `Transaction envelope is invalid: ${(e as Error).message}`);
     }
 
+    if (signal?.aborted) throw abortError();
+
     // 2. Real network call: fetch the current base fee.
     let baseFee: number;
     try {
-      baseFee = await this.server.fetchBaseFee();
+      baseFee = await withAbortSignal(this.server.fetchBaseFee(), signal);
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") throw e;
       return fail(transaction.fee, ops, `Unable to fetch network base fee from Horizon: ${(e as Error).message}`);
     }
 
     // 3. Real network call: load the source account.
     let account: any;
     try {
-      account = await this.server.accounts().accountId(transaction.source).call();
+      account = await withAbortSignal(this.server.accounts().accountId(transaction.source).call(), signal);
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") throw e;
       return fail(
         transaction.fee,
         ops,
@@ -188,7 +200,7 @@ export class StellarSimulator {
     //    no payment destination and are skipped.
     for (const op of transaction.operations) {
       if (op.type !== "payment") continue;
-      const dest = await this.checkDestination(op);
+      const dest = await this.checkDestination(op, signal);
       if (!dest.ok) return fail(transaction.fee, ops, dest.error);
     }
 
@@ -203,8 +215,9 @@ export class StellarSimulator {
     if (isSoroban) {
       let simResponse: any;
       try {
-        simResponse = await this.sorobanServer.simulateTransaction(transaction);
+        simResponse = await withAbortSignal(this.sorobanServer.simulateTransaction(transaction), signal);
       } catch (e: any) {
+        if (e?.name === "AbortError") throw e;
         return fail(transaction.fee, ops, `Soroban simulation failed: ${e.message}`);
       }
 
@@ -248,15 +261,19 @@ export class StellarSimulator {
    * runs, the source-account load (check 3) has already proven Horizon is
    * reachable, so a failure here is a genuine 404, not a network outage.
    */
-  private async checkDestination(op: {
-    destination: string;
-    asset: Asset;
-    amount: string;
-  }): Promise<{ ok: true } | { ok: false; error: string }> {
+  private async checkDestination(
+    op: {
+      destination: string;
+      asset: Asset;
+      amount: string;
+    },
+    signal?: AbortSignal
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     let destAccount: any;
     try {
-      destAccount = await this.server.accounts().accountId(op.destination).call();
-    } catch {
+      destAccount = await withAbortSignal(this.server.accounts().accountId(op.destination).call(), signal);
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") throw e;
       destAccount = null;
     }
 
