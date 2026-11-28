@@ -4,7 +4,7 @@ This document lists pages that still use the old manual fetch/error/loading patt
 
 ## Completed Migrations (Issue #75)
 
-✅ **Activity.tsx** — Initial page load now uses `useApiResource`  
+✅ **Activity.tsx** — Initial page load now uses `useApiResource` (hybrid: manual pagination preserved)  
 ✅ **ActivityDetail.tsx** — Fully migrated to `useApiResource`  
 ✅ **AgentDetail.tsx** — Main agent + activity fetch migrated to `useApiResource`
 
@@ -24,29 +24,29 @@ The following pages still use manual state management for API fetching and would
    - **Effort**: Low — already follows a clean pattern
    - **Benefits**: Consistency with other detail pages
 
+3. **Agents.tsx**
+   - **Pattern**: Custom `load()` function with pagination via `listAllAgents()`
+   - **Effort**: Low-Medium — straightforward but includes agent creation modal
+   - **Benefits**: Would standardize the initial agents list fetch
+
 ### Medium Priority (Pagination Patterns)
 
-3. **Approvals.tsx**
+4. **Approvals.tsx**
    - **Pattern**: Pagination with `loadPage` callback (similar to Activity.tsx before migration)
-   - **Effort**: Medium — would need to handle initial load + "load more" separately
+   - **Effort**: Medium — would need hybrid approach like Activity.tsx
    - **Notes**: Current implementation uses pagination which extends beyond simple initial fetch
 
-4. **Executions.tsx**
+5. **Executions.tsx**
    - **Pattern**: Pagination + separate queue summary fetch
    - **Effort**: Medium — has two parallel initial fetches (executions list + queue status)
    - **Benefits**: Could use `useApiResource` for both fetches independently
 
-5. **ScheduleList.tsx**
+6. **ScheduleList.tsx**
    - **Pattern**: Pagination with `loadPage` callback
    - **Effort**: Medium — similar to Approvals
    - **Notes**: Currently used as a component within AgentDetail
 
 ### Lower Priority (Complex/Special Cases)
-
-6. **Agents.tsx**
-   - **Pattern**: Custom `load()` function with pagination via `listAllAgents()`
-   - **Effort**: Low-Medium — straightforward but includes agent creation modal
-   - **Benefits**: Would standardize the initial agents list fetch
 
 7. **Overview.tsx**
    - **Pattern**: Multiple parallel fetches (health, agents, approvals, activity, attention counts)
@@ -92,12 +92,13 @@ When migrating additional pages:
 1. **Preserve existing behavior** — UI, loading states, error handling must remain unchanged
 2. **Use stable fetcher functions** — wrap fetchers with `useCallback` when they depend on props/state
 3. **Handle dependencies correctly** — pass all relevant dependencies to `useApiResource`
-4. **Keep pagination separate** — `useApiResource` handles initial load; pagination can remain manual for now
+4. **Keep pagination separate** — `useApiResource` handles initial load; pagination can remain manual (hybrid approach as shown in Activity.tsx)
 5. **Test thoroughly** — ensure stale requests and unmounting are handled correctly
 6. **Update existing tests** — verify that page tests still pass after migration
 
 ## Notes
 
-- The `useApiResource` hook was designed for simple initial resource loading, not incremental pagination
+- The `useApiResource` hook was designed for simple initial resource loading
+- For pagination, use a hybrid approach: `useApiResource` for initial load, manual state for load-more
 - Pages with complex multi-step flows or mutations may not benefit significantly from this hook
 - The hook's primary value is eliminating duplicated loading/error/data state and providing stale request protection

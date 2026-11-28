@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAgentNames } from '../agentNames';
@@ -8,31 +8,50 @@ import { AgentName, StatusBadge, Skeleton, EmptyState, IntentAmount, PaginationF
 
 const PAGE_SIZE = 50;
 
-interface ActivityResponse {
-  activity: ActivityRecord[];
-  hasMore: boolean;
-  nextOffset: number;
-}
-
 export default function Activity() {
   const navigate = useNavigate();
   const agentNames = useAgentNames();
+  
+  // Additional state for pagination (manual load-more)
+  const [activity, setActivity] = useState<ActivityRecord[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
 
-  const fetcher = useCallback(async (): Promise<ActivityResponse> => {
+  const fetcher = useCallback(async () => {
     const r = await api.listActivity(PAGE_SIZE, 0);
-    return {
-      activity: r.activity,
-      hasMore: r.hasMore,
-      nextOffset: r.activity.length,
-    };
+    // Update both hook state and local pagination state
+    setActivity(r.activity);
+    setHasMore(r.hasMore);
+    setNextOffset(r.activity.length);
+    return r.activity;
   }, []);
 
-  const { data, error, loading, reload } = useApiResource<ActivityResponse>(fetcher, []);
+  const { data, error, loading, reload } = useApiResource<ActivityRecord[]>(fetcher, []);
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const r = await api.listActivity(PAGE_SIZE, nextOffset);
+      setActivity((prev) => prev.concat(r.activity));
+      setHasMore(r.hasMore);
+      setNextOffset(nextOffset + r.activity.length);
+    } catch (e: any) {
+      setLoadMoreError(e.message ?? 'Failed to load more activity');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextOffset]);
+
+  const retryLoadMore = () => {
+    setLoadMoreError(null);
+    loadMore();
+  };
 
   if (error) return <EmptyState title="Failed to load activity" message={error} error={true} actionLabel="Retry" onAction={reload} />;
   if (loading || data === null) return <Skeleton label="Loading activity..." />;
-  
-  const { activity, hasMore } = data;
   
   if (activity.length === 0) {
     return (
@@ -81,8 +100,8 @@ export default function Activity() {
         </table>
       </div>
 
-      <PaginationFooter hasMore={hasMore} loadingMore={false} onLoadMore={() => {}} itemCount={activity.length} />
-      {/* Pagination not migrated - kept as future work */}
+      <PaginationFooter hasMore={hasMore} loadingMore={loadingMore} onLoadMore={loadMore} itemCount={activity.length} />
+      {loadMoreError && <div className="error" role="alert">{loadMoreError} <button className="btn btn-secondary btn-sm" onClick={retryLoadMore}>Retry</button></div>}
     </section>
   );
 }

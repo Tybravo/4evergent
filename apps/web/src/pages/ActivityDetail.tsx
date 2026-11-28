@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAgentNames, resolveAgentName } from '../agentNames';
+import { describeApiError } from '../apiErrors';
 import { useApiResource } from '../hooks/useApiResource';
 import type { ActivityRecord, ExecutionRecord } from '../types';
 import { AgentName, Skeleton, EmptyState, IntentAmount, DetailCard, Section, StatusBadge, Address } from '../components';
@@ -16,8 +17,12 @@ export default function ActivityDetail() {
     if (!agentId || !activityId) {
       throw new Error('Missing agentId or activityId');
     }
-    const r = await api.activityDetail(agentId, activityId);
-    return r.activity;
+    try {
+      const r = await api.activityDetail(agentId, activityId);
+      return r.activity;
+    } catch (e: any) {
+      throw new Error(describeApiError(e, 'Failed to load activity'));
+    }
   }, [agentId, activityId]);
 
   const { data: activity, error, loading, reload } = useApiResource<ActivityRecord | null>(fetcher, [agentId, activityId]);
